@@ -1,33 +1,18 @@
-from agents.stock_agent import StockAgent
+from crawler.price import get_price
+from engine.feature_engine import build_features
+from engine.scoring_engine import calculate_score
+from engine.backtest_engine import run_backtest
+from engine.metrics import evaluate
 
-WATCHLIST = [
-    "2330",
-    "2317",
-    "2382",
-    "2454",
-    "3017",
-    "3661",
-    "2303",
-    "2603"
-]
+df = get_price("2382", period="2y")
 
-agent = StockAgent()
+df = build_features(df)
 
-results = []
+trades = run_backtest(
+    df,
+    calculate_score
+)
 
-for stock in WATCHLIST:
-    result = agent.analyze(stock)
+print(trades.head())
 
-    if result:
-        results.append(result)
-
-results = sorted(results, key=lambda x: x["score"], reverse=True)
-
-print("今日波段候選：\n")
-
-for r in results:
-    print(
-        f"{r['stock_id']}  "
-        f"Score: {r['score']}  "
-        f"Close: {r['close']}"
-    )
+print(evaluate(trades))
