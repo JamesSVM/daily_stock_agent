@@ -1,5 +1,6 @@
 from crawler.price import get_price
-from engine.backtest_mean_reversion import simulate_stock, summarize_trades
+from engine.backtest_mean_reversion import simulate_stock
+from engine.metrics import evaluate_backtest
 
 WATCHLIST = [
     "2330", "2317", "2382", "2454", "3017", "3661", "2303", "2603"
@@ -26,10 +27,26 @@ def main():
         all_trades.extend(trades)
         print(f"{stock_id}: {len(trades)} trades")
 
-    summary = summarize_trades(all_trades)
+    
+    summary = evaluate_backtest(all_trades)
+
     print("\n=== Mean Reversion Backtest ===")
-    for key, value in summary.items():
+
+    print("\n[Performance]")
+    for key, value in summary["performance"].items():
         print(f"{key}: {value}")
+
+    print("\n[Score Analysis]")
+    for score_bucket, stats in summary["score_analysis"].items():
+        print(f"{score_bucket}: {stats}")
+
+    print("\n[Exit Analysis]")
+    for exit_reason, stats in summary["exit_analysis"].items():
+        print(f"{exit_reason}: {stats}")
+
+    print("\n[Stock Analysis]")
+    for stock_id, stats in summary["stock_analysis"].items():
+        print(f"{stock_id}: {stats}")
 
     if all_trades:
         import pandas as pd

@@ -69,6 +69,7 @@ def simulate_stock(
                 "signal_date": data.index[i] if data.index.name else row.get("Date", i),
                 "entry_date": data.index[entry_i] if data.index.name else entry_row.get("Date", entry_i),
                 "exit_date": data.index[exit_i] if data.index.name else data.iloc[exit_i].get("Date", exit_i),
+                "holding_days": exit_i - entry_i + 1,
                 "score": signal["score"],
                 "oversold_score": signal["oversold_score"],
                 "reversal_score": signal["reversal_score"],
