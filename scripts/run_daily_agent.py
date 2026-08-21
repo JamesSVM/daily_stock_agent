@@ -6,7 +6,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = REPO_ROOT / "data" / "database.db"
 REPORT_PATH = REPO_ROOT / "reports" / "daily_signal.csv"
@@ -25,7 +24,7 @@ def main() -> None:
 
     env = os.environ.copy()
     env.setdefault("OLLAMA_URL", "http://localhost:11434/api/chat")
-    env.setdefault("OLLAMA_MODEL", "qwen2.5-coder:7b")
+    env.setdefault("OLLAMA_MODEL", "qwen3:8b")
 
     run_step(
         "Refresh market data",
@@ -33,14 +32,7 @@ def main() -> None:
         env,
     )
 
-    command = [
-        sys.executable,
-        "daily_report.py",
-        "--db",
-        str(DB_PATH),
-        "--output",
-        str(REPORT_PATH),
-    ]
+    command = [sys.executable, "daily_report.py", "--db", str(DB_PATH), "--output", str(REPORT_PATH)]
     if args.send_email:
         command.append("--send-email")
 
