@@ -9,6 +9,25 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = REPO_ROOT / "data" / "database.db"
 REPORT_PATH = REPO_ROOT / "reports" / "daily_signal.csv"
+ENV_FILE = Path.home() / ".daily_stock_agent.env"
+
+
+def _load_env_file(path: Path) -> None:
+    """Load KEY=VALUE settings without overriding explicit shell variables."""
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
 
 
 def run_step(label: str, command: list[str], env: dict[str, str] | None = None) -> None:
@@ -22,6 +41,7 @@ def main() -> None:
     parser.add_argument("--period", default="3mo")
     args = parser.parse_args()
 
+    _load_env_file(ENV_FILE)
     env = os.environ.copy()
     env.setdefault("OLLAMA_URL", "http://localhost:11434/api/chat")
     env.setdefault("OLLAMA_MODEL", "qwen3:8b")
