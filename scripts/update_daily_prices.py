@@ -21,22 +21,41 @@ def _normalize_stock_id(stock_id: object) -> str:
 def _upsert_stock_history(conn: sqlite3.Connection, stock_id: str, df: pd.DataFrame) -> int:
     if df is None or df.empty or "Date" not in df.columns:
         return 0
+
     data = df.copy()
     data["Date"] = pd.to_datetime(data["Date"], errors="coerce")
     data = data.dropna(subset=["Date"])
-    data = data.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"})
+    data = data.rename(columns={
+        "Open": "open",
+        "High": "high",
+        "Low": "low",
+        "Close": "close",
+        "Volume": "volume",
+    })
+
     required = ["open", "high", "low", "close", "volume"]
     if any(column not in data.columns for column in required):
         return 0
+
     for column in required:
         data[column] = pd.to_numeric(data[column], errors="coerce")
     data = data.dropna(subset=required)
     if data.empty:
         return 0
-    rows = [
-        (stock_id, timestamp.date().isoformat(), float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"]), int(row["volume"]))
-        for timestamp, row in data.iterrows()
-    ]
+
+    rows = []
+    for _, row in data.iterrows():
+        trade_date = pd.Timestamp(row["Date"]).date().isoformat()
+        rows.append((
+            stock_id,
+            trade_date,
+            float(row["open"]),
+            float(row["high"]),
+            float(row["low"]),
+            float(row["close"]),
+            int(row["volume"]),
+        ))
+
     conn.executemany(
         """
         INSERT INTO daily_price (stock_id, date, open, high, low, close, volume)
@@ -64,15 +83,22 @@ def update_database(db_path: str, period: str = "3mo") -> tuple[int, int]:
         )
         stock_ids = [
             _normalize_stock_id(row[0])
-            for row in conn.execute("SELECT DISTINCT stock_id FROM daily_price ORDER BY stock_id").fetchall()
+            for row in conn.execute(
+                "SELECT DISTINCT stock_id FROM daily_price ORDER BY stock_id"
+            ).fetchall()
             if row[0] is not None
         ]
         if not stock_ids:
             raise RuntimeError("No stock_ids found in daily_price; cannot refresh prices automatically.")
+
         stocks_updated = 0
         rows_upserted = 0
         for stock_id in stock_ids:
-            count = _upsert_stock_history(conn, stock_id, get_price(stock_id, period=period))
+            count = _upsert_stock_history(
+                conn,
+                stock_id,
+                get_price(stock_id, period=period),
+            )
             if count:
                 stocks_updated += 1
                 rows_upserted += count
