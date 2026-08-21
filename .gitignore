@@ -9,3 +9,4 @@ __pycache__/
 # Local market database
 data/database.db
 trades_mean_reversion.csv
+reports/
