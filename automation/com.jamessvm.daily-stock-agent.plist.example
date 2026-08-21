@@ -19,7 +19,7 @@
     <key>OLLAMA_URL</key>
     <string>http://localhost:11434/api/chat</string>
     <key>OLLAMA_MODEL</key>
-    <string>qwen2.5-coder:7b</string>
+    <string>qwen3:8b</string>
     <key>OLLAMA_TIMEOUT_SECONDS</key>
     <string>120</string>
   </dict>
