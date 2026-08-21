@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jamessvm.daily-stock-agent</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/USERNAME/daily_stock_agent/.venv/bin/python</string>
+    <string>/Users/USERNAME/daily_stock_agent/scripts/run_daily_agent.py</string>
+    <string>--send-email</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/USERNAME/daily_stock_agent</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>OLLAMA_URL</key>
+    <string>http://localhost:11434/api/chat</string>
+    <key>OLLAMA_MODEL</key>
+    <string>qwen2.5-coder:7b</string>
+    <key>OLLAMA_TIMEOUT_SECONDS</key>
+    <string>120</string>
+
+    <!-- Replace these with your local mail settings or use a wrapper that exports them securely. -->
+    <key>SMTP_HOST</key>
+    <string>smtp.example.com</string>
+    <key>SMTP_PORT</key>
+    <string>587</string>
+    <key>SMTP_USER</key>
+    <string>YOUR_SMTP_USER</string>
+    <key>SMTP_PASSWORD</key>
+    <string>YOUR_SMTP_PASSWORD</string>
+    <key>EMAIL_FROM</key>
+    <string>YOUR_FROM_ADDRESS</string>
+    <key>EMAIL_TO</key>
+    <string>YOUR_TO_ADDRESS</string>
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>1</integer>
+    <key>Hour</key>
+    <integer>18</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/USERNAME/daily_stock_agent/reports/launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/USERNAME/daily_stock_agent/reports/launchd.error.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
