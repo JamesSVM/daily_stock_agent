@@ -48,16 +48,16 @@ def simulate_portfolio(
 
     if trades.empty:
         return (
-            pd.DataFrame(columns=["date", "cash", "positions", "exposure", "exposure_pct", "equity"]),
+            pd.DataFrame(
+                columns=["date", "cash", "positions", "exposure", "exposure_pct", "equity"]
+            ),
             pd.DataFrame(),
             pd.DataFrame(),
             _empty_metrics(initial_capital, allocation_pct, max_positions, costs),
         )
 
     df = trades.copy()
-    required = {
-        "stock_id", "entry_date", "exit_date", "entry", "exit", "score", "exit_reason"
-    }
+    required = {"stock_id", "entry_date", "exit_date", "entry", "exit", "score", "exit_reason"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"trades missing required columns: {sorted(missing)}")
@@ -89,7 +89,6 @@ def simulate_portfolio(
     start_date = df["entry_date"].min()
     end_date = df["exit_date"].max()
     dates = pd.date_range(start_date, end_date, freq="B")
-
     entries_by_date = {
         date: group.to_dict("records")
         for date, group in df.groupby("entry_date", sort=True)
@@ -101,8 +100,9 @@ def simulate_portfolio(
     fills: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
 
-    for date in dates:
-        # Close planned exits first so completed positions free capital/slots.
+    def close_positions_for_date(date: pd.Timestamp) -> None:
+        nonlocal cash
+
         exit_ids = [
             trade_id
             for trade_id, position in positions.items()
@@ -117,9 +117,9 @@ def simulate_portfolio(
                 costs,
             )
             cash += proceeds
-
             entry_cash = position["entry_cash"]
             pnl = proceeds - entry_cash
+
             fills.append(
                 {
                     "trade_id": trade_id,
@@ -139,10 +139,14 @@ def simulate_portfolio(
                 }
             )
 
+    for date in dates:
+        # Close prior positions first to free cash/slots.
+        close_positions_for_date(date)
+
         candidates = entries_by_date.get(date, [])
-        available_slots = max_positions - len(positions)
-        selected = candidates[: max(available_slots, 0)]
-        skipped = candidates[max(available_slots, 0) :]
+        available_slots = max(max_positions - len(positions), 0)
+        selected = candidates[:available_slots]
+        skipped = candidates[available_slots:]
 
         for record in skipped:
             rejected.append(
@@ -158,10 +162,7 @@ def simulate_portfolio(
         for record in selected:
             stock_id = str(record["stock_id"])
 
-            if any(
-                position["stock_id"] == stock_id
-                for position in positions.values()
-            ):
+            if any(position["stock_id"] == stock_id for position in positions.values()):
                 rejected.append(
                     {
                         "trade_id": int(record["trade_id"]),
@@ -173,17 +174,13 @@ def simulate_portfolio(
                 )
                 continue
 
-            target_cash = min(
-                cash,
-                initial_capital * allocation_pct,
-            )
+            target_cash = min(cash, initial_capital * allocation_pct)
             unit_cash = (
                 float(record["entry"])
                 * (1.0 + costs.buy_slippage)
                 * (1.0 + costs.buy_commission)
             )
             quantity = target_cash / unit_cash if unit_cash > 0 else 0.0
-
             if quantity <= 0:
                 rejected.append(
                     {
@@ -196,13 +193,8 @@ def simulate_portfolio(
                 )
                 continue
 
-            entry_cash = _buy_cash_required(
-                float(record["entry"]),
-                quantity,
-                costs,
-            )
+            entry_cash = _buy_cash_required(float(record["entry"]), quantity, costs)
             cash -= entry_cash
-
             positions[int(record["trade_id"])] = {
                 "trade_id": int(record["trade_id"]),
                 "stock_id": stock_id,
@@ -216,24 +208,19 @@ def simulate_portfolio(
                 "exit_reason": str(record["exit_reason"]),
             }
 
+        # Handle trades whose exit date equals their entry date.
+        close_positions_for_date(date)
+
         exposure = 0.0
         equity = cash
-
         for position in positions.values():
-            close_price = close_lookup.get(
-                (date, position["stock_id"]),
-                np.nan,
-            )
+            close_price = close_lookup.get((date, position["stock_id"]), np.nan)
             if pd.isna(close_price):
                 close_price = position["entry_price"]
             close_price = float(close_price)
 
             exposure += close_price * position["quantity"]
-            equity += _sell_cash_proceeds(
-                close_price,
-                position["quantity"],
-                costs,
-            )
+            equity += _sell_cash_proceeds(close_price, position["quantity"], costs)
 
         equity_rows.append(
             {
@@ -249,15 +236,14 @@ def simulate_portfolio(
     equity_curve = pd.DataFrame(equity_rows)
     fills_df = pd.DataFrame(fills)
     rejected_df = pd.DataFrame(rejected)
-
     metrics = _portfolio_metrics(
-        equity_curve=equity_curve,
-        fills=fills_df,
-        rejected=rejected_df,
-        initial_capital=initial_capital,
-        allocation_pct=allocation_pct,
-        max_positions=max_positions,
-        costs=costs,
+        equity_curve,
+        fills_df,
+        rejected_df,
+        initial_capital,
+        allocation_pct,
+        max_positions,
+        costs,
     )
 
     return equity_curve, fills_df, rejected_df, metrics
@@ -304,21 +290,10 @@ def _portfolio_metrics(
     costs: CostModel,
 ) -> dict[str, Any]:
     if equity_curve.empty:
-        return _empty_metrics(
-            initial_capital,
-            allocation_pct,
-            max_positions,
-            costs,
-        )
+        return _empty_metrics(initial_capital, allocation_pct, max_positions, costs)
 
-    equity = pd.to_numeric(
-        equity_curve["equity"],
-        errors="coerce",
-    ).dropna()
-    daily_returns = equity.pct_change().replace(
-        [np.inf, -np.inf],
-        np.nan,
-    ).dropna()
+    equity = pd.to_numeric(equity_curve["equity"], errors="coerce").dropna()
+    daily_returns = equity.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
     drawdown = equity / equity.cummax() - 1.0
     max_dd = float(drawdown.min())
 
@@ -332,15 +307,12 @@ def _portfolio_metrics(
 
     if len(daily_returns) >= 2 and daily_returns.std(ddof=1) > 0:
         sharpe = float(
-            daily_returns.mean()
-            / daily_returns.std(ddof=1)
-            * np.sqrt(252)
+            daily_returns.mean() / daily_returns.std(ddof=1) * np.sqrt(252)
         )
     else:
         sharpe = 0.0
 
     calmar = cagr / abs(max_dd) if max_dd < 0 else 0.0
-
     result: dict[str, Any] = {
         "initial_capital": round(initial_capital, 2),
         "final_equity": round(final_equity, 2),
@@ -349,14 +321,8 @@ def _portfolio_metrics(
         "max_drawdown_pct": round(max_dd * 100.0, 2),
         "sharpe": round(sharpe, 2),
         "calmar": round(calmar, 2),
-        "avg_exposure_pct": round(
-            float(equity_curve["exposure_pct"].mean()),
-            2,
-        ),
-        "max_exposure_pct": round(
-            float(equity_curve["exposure_pct"].max()),
-            2,
-        ),
+        "avg_exposure_pct": round(float(equity_curve["exposure_pct"].mean()), 2),
+        "max_exposure_pct": round(float(equity_curve["exposure_pct"].max()), 2),
         "trades_executed": int(len(fills)),
         "trades_rejected": int(len(rejected)),
         "allocation_pct": allocation_pct * 100.0,
@@ -369,37 +335,22 @@ def _portfolio_metrics(
     }
 
     if not fills.empty:
-        net_returns = pd.to_numeric(
-            fills["net_return_pct"],
-            errors="coerce",
-        ).dropna()
+        net_returns = pd.to_numeric(fills["net_return_pct"], errors="coerce").dropna()
         wins = net_returns[net_returns > 0]
         losses = net_returns[net_returns < 0]
         gross_profit = float(wins.sum())
         gross_loss = abs(float(losses.sum()))
         result.update(
             {
-                "win_rate_pct": round(
-                    float((net_returns > 0).mean() * 100.0),
-                    2,
-                ),
-                "avg_net_return_pct": round(
-                    float(net_returns.mean()),
-                    2,
-                ),
-                "profit_factor": round(
-                    gross_profit / gross_loss if gross_loss > 0 else 0.0,
-                    2,
-                ),
+                "win_rate_pct": round(float((net_returns > 0).mean() * 100.0), 2),
+                "avg_net_return_pct": round(float(net_returns.mean()), 2),
+                "profit_factor": round(gross_profit / gross_loss if gross_loss > 0 else 0.0, 2),
                 "avg_holding_days": round(
                     float(
                         (
                             pd.to_datetime(fills["exit_date"])
                             - pd.to_datetime(fills["entry_date"])
-                        )
-                        .dt.days
-                        .add(1)
-                        .mean()
+                        ).dt.days.add(1).mean()
                     ),
                     2,
                 ),
