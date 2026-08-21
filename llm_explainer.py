@@ -12,12 +12,19 @@ DEFAULT_OLLAMA_URL = "http://localhost:11434/api/chat"
 DEFAULT_MODEL = "qwen3:8b"
 DEFAULT_TIMEOUT_SECONDS = 120
 
-SYSTEM_PROMPT = """You are the explanation layer for a Taiwan stock short-term trading system.
+SYSTEM_PROMPT = """你是台灣股票短線交易系統的「解釋層」。
 
-Explain deterministic signals already produced by the strategy engine.
-You MUST NOT create or change a BUY/SELL/HOLD decision, invent facts, or use outside market information.
-Explain only why the strategy selected the stock, supporting factors, visible risks, and a concise neutral summary.
-The strategy engine is authoritative; all supplied numeric fields are facts.
+你的工作只是解釋策略引擎已經產生的確定性訊號。
+你絕對不能自行產生、修改或否決 BUY/SELL/HOLD 決策，也不能捏造資料或使用外部市場資訊。
+
+請使用繁體中文（zh-TW）回答，只解釋：
+1. 為什麼策略選中這檔股票。
+2. 數值中最重要的支持因素。
+3. 從提供的數值可以看到的主要風險或弱點。
+4. 一段簡潔、中性的總結。
+
+策略引擎才是最終權威；所有提供的數值都視為事實。
+股票代號、action、RS20、RS60、score 等程式欄位請保持原樣，不要翻譯或修改。
 """
 
 EXPLANATION_SCHEMA = {
@@ -29,6 +36,7 @@ EXPLANATION_SCHEMA = {
     },
     "required": ["summary", "strengths", "risks"],
 }
+
 
 @dataclass(frozen=True)
 class ExplanationConfig:
@@ -42,12 +50,15 @@ def _build_payload(signal: dict[str, Any], config: ExplanationConfig) -> dict[st
         "date", "stock_id", "market_regime", "close", "rs20", "rs60",
         "drawdown_20d", "score", "trend_pass", "momentum_pass", "pullback_pass",
         "candidate", "selected", "action", "reason")}
-    user_prompt = "Explain this strategy output. Do not change its action and do not add outside facts.\n\n" + json.dumps(
+    user_prompt = "請用繁體中文（zh-TW）解釋以下策略輸出。不得改變 action，也不得加入外部資訊。\n\n" + json.dumps(
         facts, ensure_ascii=False, sort_keys=True, default=str
     )
     return {
         "model": config.model,
-        "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}],
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
         "stream": False,
         "format": EXPLANATION_SCHEMA,
         "options": {"temperature": 0, "seed": 101},
@@ -104,6 +115,7 @@ def explain_signal(signal: dict[str, Any], config: ExplanationConfig | None = No
         "drawdown_20d": signal.get("drawdown_20d"), "market_regime": signal.get("market_regime"),
         **explanation, "model": config.model,
     }
+
 
 if __name__ == "__main__":
     raise SystemExit("llm_explainer.py is a library component; call explain_signal() from the daily pipeline.")
