@@ -14,7 +14,7 @@ from typing import Any
 from urllib import error, request
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434/api/chat"
-DEFAULT_MODEL = "qwen3:8b"
+DEFAULT_MODEL = "qwen2.5-coder:7b"
 DEFAULT_TIMEOUT_SECONDS = 120
 
 SYSTEM_PROMPT = """You are the explanation layer for a Taiwan stock short-term trading system.
@@ -106,8 +106,8 @@ def _post_json(url: str, payload: dict[str, Any], timeout_seconds: int) -> dict[
         if exc.code == 404:
             raise RuntimeError(
                 "Ollama returned HTTP 404 at "
-                f"{url}. The server is reachable, but this endpoint was not found. "
-                "Check the local Ollama server/API URL. "
+                f"{url}. The server is reachable, but the requested resource was not found. "
+                "Check OLLAMA_URL and OLLAMA_MODEL. "
                 f"Response: {detail or '<empty>'}"
             ) from exc
         raise RuntimeError(
@@ -161,7 +161,6 @@ def explain_signal(
     ):
         raise RuntimeError("Ollama explanation risks must be a list of strings.")
 
-    # Preserve the strategy decision exactly; the LLM is explanation-only.
     return {
         "date": signal.get("date"),
         "stock_id": signal.get("stock_id"),
