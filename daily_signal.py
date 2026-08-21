@@ -3,21 +3,11 @@ from __future__ import annotations
 """Generate the daily V1.5 live-trading signal sheet.
 
 This module intentionally does not place orders. It converts the frozen V1.5
-research rules into a repeatable daily candidate scan:
+research rules into a repeatable daily candidate scan.
 
-1. Load the latest OHLCV data from the local SQLite database.
-2. Build the equal-weighted market proxy and regime.
-3. Calculate V1.3 relative-strength features for every stock.
-4. Apply the frozen V1.5 candidate rules.
-5. Rank candidates and keep at most MAX_POSITIONS.
-
-The signal is generated from the latest completed trading day's close. The
-actual entry, when applicable, is the next trading day's open.
-
-Important V1.5 parity rule:
-- Market regime is a portfolio risk-control input for exits; it is not an
-  entry gate. Candidates can still be generated in a bear regime, matching
-  the frozen V1.5 backtest design.
+Parity rules:
+- Market regime is used for portfolio-level exits, not as an entry gate.
+- Candidate ranking is RS20 descending, then score descending, then stock_id.
 """
 
 import argparse
@@ -35,7 +25,6 @@ from features.relative_strength import (
 DB_PATH = "data/database.db"
 DEFAULT_OUTPUT = "reports/daily_signal.csv"
 
-# Frozen V1.5 configuration from backtest_v1_5_final.py.
 MAX_POSITIONS = 3
 RS_THRESHOLD = 0.10
 PULLBACK_MIN = -0.07
@@ -88,11 +77,7 @@ def is_v15_candidate(
     trend_pass: bool,
     momentum_pass: bool,
 ) -> bool:
-    """Apply the frozen V1.5 entry candidate definition.
-
-    This intentionally excludes market regime. V1.5 uses regime for the
-    portfolio-level bull->neutral exit policy, not as an entry filter.
-    """
+    """Apply the frozen V1.5 entry candidate definition."""
     return (
         rs20 > RS_THRESHOLD
         and PULLBACK_MIN <= drawdown_20d <= PULLBACK_MAX
@@ -100,6 +85,28 @@ def is_v15_candidate(
         and trend_pass
         and momentum_pass
     )
+
+
+def rank_and_select_signals(signals: pd.DataFrame) -> pd.DataFrame:
+    """Apply the frozen V1.5 ranking and position cap to a signal table."""
+    if signals.empty:
+        result = signals.copy()
+        result["selected"] = pd.Series(dtype=bool)
+        result["action"] = pd.Series(dtype=str)
+        return result
+
+    result = signals.sort_values(
+        ["candidate", "rs20", "score", "stock_id"],
+        ascending=[False, False, False, True],
+    ).reset_index(drop=True)
+
+    candidate_idx = result.index[result["candidate"]].tolist()
+    selected_idx = set(candidate_idx[:MAX_POSITIONS])
+    result["selected"] = result.index.isin(selected_idx)
+    result["action"] = result["selected"].map(
+        {True: "BUY_NEXT_OPEN", False: "WATCH"}
+    )
+    return result
 
 
 def build_signal_sheet(stock_data: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, str]:
@@ -162,24 +169,7 @@ def build_signal_sheet(stock_data: dict[str, pd.DataFrame]) -> tuple[pd.DataFram
     if signals.empty:
         return signals, latest_regime
 
-    # Match frozen V1.5 portfolio selection priority exactly:
-    # RS20 descending, then score descending, then stock_id ascending.
-    signals = signals.sort_values(
-        ["candidate", "rs20", "score", "stock_id"],
-        ascending=[False, False, False, True],
-    ).reset_index(drop=True)
-
-    candidate_idx = signals.index[signals["candidate"]].tolist()
-    selected_idx = set(candidate_idx[:MAX_POSITIONS])
-    signals["selected"] = signals.index.isin(selected_idx)
-
-    # A selected signal is a recommendation for the next trading session;
-    # no order is submitted by this script.
-    signals["action"] = signals["selected"].map(
-        {True: "BUY_NEXT_OPEN", False: "WATCH"}
-    )
-
-    return signals, latest_regime
+    return rank_and_select_signals(signals), latest_regime
 
 
 def run(db_path: str = DB_PATH, output_path: str = DEFAULT_OUTPUT) -> pd.DataFrame:
