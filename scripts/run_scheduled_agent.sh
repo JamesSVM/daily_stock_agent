@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-REPO_ROOT="/Users/USERNAME/daily_stock_agent"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$HOME/.daily_stock_agent.env"
 
 if [ ! -f "$ENV_FILE" ]; then
