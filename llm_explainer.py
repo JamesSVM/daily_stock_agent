@@ -98,6 +98,21 @@ def _post_json(url: str, payload: dict[str, Any], timeout_seconds: int) -> dict[
     try:
         with request.urlopen(req, timeout=timeout_seconds) as response:
             return json.loads(response.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace").strip()
+        except Exception:
+            detail = ""
+        if exc.code == 404:
+            raise RuntimeError(
+                "Ollama returned HTTP 404 at "
+                f"{url}. The server is reachable, but this endpoint was not found. "
+                "Check the local Ollama server/API URL. "
+                f"Response: {detail or '<empty>'}"
+            ) from exc
+        raise RuntimeError(
+            f"Ollama HTTP {exc.code} at {url}. Response: {detail or '<empty>'}"
+        ) from exc
     except error.URLError as exc:
         raise RuntimeError(f"Unable to reach Ollama at {url}: {exc}") from exc
     except json.JSONDecodeError as exc:
