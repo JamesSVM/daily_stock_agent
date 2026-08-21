@@ -16,3 +16,9 @@ trades_*.csv
 reports/
 
 relative_strength_selectivity_v1_3.csv
+
+# V1.5 Live runtime outputs
+live/output/
+live/logs/
+daily_signals/
+*.log
