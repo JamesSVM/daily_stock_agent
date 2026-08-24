@@ -35,6 +35,25 @@ def run_step(label: str, command: list[str], env: dict[str, str] | None = None) 
     subprocess.run(command, cwd=REPO_ROOT, env=env, check=True)
 
 
+def _send_failure_alert(error: Exception) -> None:
+    """Send a lightweight alert without invoking the LLM/report pipeline."""
+    try:
+        from email_notifier import send_email
+
+        body = (
+            "Daily Stock Agent ALERT\n\n"
+            "The market-data refresh did not pass its safety checks.\n"
+            "No trading signal or BUY_NEXT_OPEN report was generated.\n\n"
+            f"Reason: {error}\n\n"
+            "Check reports/launchd.log and reports/launchd.error.log.\n"
+            "If the failure is Yahoo data freshness, the scheduled retry will try again next run."
+        )
+        send_email(body, subject="Daily Stock Agent ALERT - Data Refresh Failed")
+        print("Alert email: sent")
+    except Exception as alert_error:  # noqa: BLE001 - do not hide original refresh failure
+        print(f"Alert email: failed ({alert_error})")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the complete daily stock agent")
     parser.add_argument("--send-email", action="store_true")
@@ -46,18 +65,40 @@ def main() -> None:
     env.setdefault("OLLAMA_URL", "http://localhost:11434/api/chat")
     env.setdefault("OLLAMA_MODEL", "qwen3:8b")
 
-    run_step(
-        "Refresh market data",
-        [sys.executable, "scripts/update_daily_prices.py", "--db", str(DB_PATH), "--period", args.period],
-        env,
-    )
+    try:
+        run_step(
+            "Refresh market data",
+            [
+                sys.executable,
+                "scripts/update_daily_prices.py",
+                "--db",
+                str(DB_PATH),
+                "--period",
+                args.period,
+                "--retry-attempts",
+                "3",
+                "--retry-wait-seconds",
+                "600",
+                "--min-coverage",
+                "0.90",
+            ],
+            env,
+        )
 
-    command = [sys.executable, "daily_report.py", "--db", str(DB_PATH), "--output", str(REPORT_PATH)]
-    if args.send_email:
-        command.append("--send-email")
+        command = [sys.executable, "daily_report.py", "--db", str(DB_PATH), "--output", str(REPORT_PATH)]
+        if args.send_email:
+            command.append("--send-email")
 
-    run_step("Generate signal + LLM explanation + report", command, env)
-    print("\nDaily stock agent completed successfully.")
+        run_step("Generate signal + LLM explanation + report", command, env)
+        print("\nDaily stock agent completed successfully.")
+    except subprocess.CalledProcessError as error:
+        print(f"\nDaily stock agent aborted safely: step failed with exit code {error.returncode}.")
+        _send_failure_alert(error)
+        raise
+    except Exception as error:
+        print(f"\nDaily stock agent aborted safely: {error}")
+        _send_failure_alert(error)
+        raise
 
 
 if __name__ == "__main__":
