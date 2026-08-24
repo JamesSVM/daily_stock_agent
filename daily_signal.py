@@ -34,11 +34,13 @@ MIN_SCORE = 70.0
 
 
 def load_stock_data(conn: sqlite3.Connection) -> dict[str, pd.DataFrame]:
-    """Load all stocks from daily_price, normalized to the engine schema."""
+    """Load active stocks from daily_price, excluding quarantined tickers."""
     query = """
-        SELECT stock_id, date, open, high, low, close, volume
-        FROM daily_price
-        ORDER BY date, stock_id
+        SELECT p.stock_id, p.date, p.open, p.high, p.low, p.close, p.volume
+        FROM daily_price p
+        LEFT JOIN price_update_status s ON s.stock_id = p.stock_id
+        WHERE COALESCE(s.quarantined, 0) = 0
+        ORDER BY p.date, p.stock_id
     """
     raw = pd.read_sql_query(query, conn)
     if raw.empty:
