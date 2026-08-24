@@ -2,13 +2,17 @@ import pandas as pd
 import yfinance as yf
 
 
+YF_TIMEOUT_SECONDS = 15
+
+
 def _fetch_yf_data(ticker, period="6mo"):
-    """內部輔助函式：負責實際下載與整理 DataFrame"""
+    """內部輔助函式：負責實際下載與整理 DataFrame。"""
     df = yf.download(
         ticker,
         period=period,
         auto_adjust=False,
         progress=False,
+        timeout=YF_TIMEOUT_SECONDS,
     )
 
     if df.empty:
@@ -26,7 +30,7 @@ def _fetch_yf_data(ticker, period="6mo"):
 
 def get_price(stock_id, period="6mo"):
     """
-    支援台股上市 (.TW)、上櫃 (.TWO) 自動判斷與美股代碼查詢
+    支援台股上市 (.TW)、上櫃 (.TWO) 自動判斷與美股代碼查詢。
 
     :param stock_id: 股票代碼 (str 或 int)，例如 '2330', '6488', 'AAPL', '0050'
     :param period: 查詢區間，預設 '6mo'
