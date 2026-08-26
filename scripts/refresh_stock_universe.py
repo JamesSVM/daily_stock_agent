@@ -13,6 +13,8 @@ import csv
 import json
 import sqlite3
 import ssl
+import subprocess
+import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -29,9 +31,9 @@ TWSE_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
 TPEX_URL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes"
 TARGET_COUNT = 300
 
-# macOS Homebrew Python 3.14 can reject otherwise valid public certificates
-# when its default trust store is incomplete. certifi provides a portable CA
-# bundle without disabling TLS verification.
+# Prefer normal Python TLS verification. macOS/Homebrew Python 3.14 can still
+# reject the TPEx certificate chain even though the system curl trust store
+# accepts it, so _fetch_json() has a curl fallback for that specific case.
 SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 
@@ -40,8 +42,47 @@ def _fetch_json(url: str) -> list[dict]:
         url,
         headers={"User-Agent": "daily-stock-agent/1.6"},
     )
-    with urllib.request.urlopen(request, timeout=30, context=SSL_CONTEXT) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+
+    try:
+        with urllib.request.urlopen(request, timeout=30, context=SSL_CONTEXT) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.URLError as exc:
+        # TPEx currently presents a certificate chain that can trigger
+        # "Missing Subject Key Identifier" in some Homebrew Python/OpenSSL
+        # combinations. The same Mac can successfully verify the endpoint
+        # with its system curl, so use curl as a verification-preserving fallback.
+        reason = getattr(exc, "reason", exc)
+        if "CERTIFICATE_VERIFY_FAILED" not in str(reason):
+            raise
+
+        try:
+            completed = subprocess.run(
+                [
+                    "curl",
+                    "--fail",
+                    "--silent",
+                    "--show-error",
+                    "--location",
+                    "--max-time",
+                    "30",
+                    "-A",
+                    "daily-stock-agent/1.6",
+                    url,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as curl_exc:
+            raise RuntimeError(
+                "Python TLS verification failed and curl is not installed."
+            ) from curl_exc
+        except subprocess.CalledProcessError as curl_exc:
+            detail = curl_exc.stderr.strip() or "unknown curl error"
+            raise RuntimeError(f"curl failed to fetch {url}: {detail}") from curl_exc
+
+        payload = json.loads(completed.stdout)
+
     if not isinstance(payload, list):
         raise RuntimeError(f"Unexpected API response from {url}")
     return [row for row in payload if isinstance(row, dict)]
