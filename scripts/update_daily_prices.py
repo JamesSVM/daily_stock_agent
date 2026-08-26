@@ -54,15 +54,31 @@ def _ensure_status_table(conn: sqlite3.Connection) -> None:
 
 
 def _get_active_stock_ids(conn: sqlite3.Connection) -> list[str]:
-    rows = conn.execute(
-        """
-        SELECT DISTINCT p.stock_id
-        FROM daily_price p
-        LEFT JOIN price_update_status s ON s.stock_id = p.stock_id
-        WHERE COALESCE(s.quarantined, 0) = 0
-        ORDER BY p.stock_id
-        """
-    ).fetchall()
+    """Return the current universe; keep the old DB fallback for safe upgrades."""
+    table_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='stock_universe'"
+    ).fetchone()
+
+    if table_exists:
+        rows = conn.execute(
+            """
+            SELECT stock_id
+            FROM stock_universe
+            WHERE is_active = 1
+            ORDER BY stock_id
+            """
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT p.stock_id
+            FROM daily_price p
+            LEFT JOIN price_update_status s ON s.stock_id = p.stock_id
+            WHERE COALESCE(s.quarantined, 0) = 0
+            ORDER BY p.stock_id
+            """
+        ).fetchall()
+
     return [_normalize_stock_id(row[0]) for row in rows if row[0] is not None]
 
 
@@ -221,7 +237,7 @@ def update_database(
         _ensure_status_table(conn)
         stock_ids = _get_active_stock_ids(conn)
         if not stock_ids:
-            raise RuntimeError("No active stock_ids found in daily_price; cannot refresh prices automatically.")
+            raise RuntimeError("No active stock_ids found in the stock universe; cannot refresh prices automatically.")
 
         failures: list[dict[str, object]] = []
         stocks_updated = 0
@@ -252,8 +268,6 @@ def update_database(
 
         conn.commit()
 
-        # P0/P1: use the Taiwan weighted index as Yahoo's market-date reference,
-        # then retry only stocks that are still behind that date.
         expected_date = _fetch_benchmark_date()
         today = datetime.now(TAIPEI_TZ).date()
         if require_today and today.weekday() < 5 and expected_date != today:
