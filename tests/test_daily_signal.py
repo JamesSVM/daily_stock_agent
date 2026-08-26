@@ -31,13 +31,16 @@ def _make_stock(close_values: list[float]) -> pd.DataFrame:
 
 
 def _synthetic_universe() -> dict[str, pd.DataFrame]:
-    """One strong pullback candidate plus five weak/flat stocks."""
+    """One deterministic V1.5 candidate plus five weak/flat stocks."""
     n = 90
     weak = np.linspace(100.0, 100.5, n).tolist()
 
-    strong = list(np.linspace(70.0, 100.0, 70))
-    strong.extend(np.linspace(100.0, 108.0, 15))
-    strong.extend([106.0, 105.0, 103.5, 102.5, 102.0])
+    # The final 20 sessions rise from 90 to a 110 peak, then pull back to
+    # 105. This deliberately satisfies the frozen V1.5 pullback window while
+    # keeping 20D/60D momentum and the MA20 trend positive.
+    strong = list(np.linspace(70.0, 90.0, 70))
+    strong.extend(np.linspace(90.0, 110.0, 10))
+    strong.extend(np.linspace(110.0, 105.0, 10))
 
     return {
         "STRONG": _make_stock(strong),
