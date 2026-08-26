@@ -50,8 +50,10 @@ def _build_payload(signal: dict[str, Any], config: ExplanationConfig) -> dict[st
         "date", "stock_id", "market_regime", "close", "rs20", "rs60",
         "drawdown_20d", "score", "trend_pass", "momentum_pass", "pullback_pass",
         "candidate", "selected", "action", "reason")}
-    user_prompt = "請用繁體中文（zh-TW）解釋以下策略輸出。不得改變 action，也不得加入外部資訊。\n\n" + json.dumps(
-        facts, ensure_ascii=False, sort_keys=True, default=str
+    user_prompt = (
+        "請用繁體中文（zh-TW）解釋以下策略輸出。不得改變 action，也不得加入外部資訊。\n"
+        "Do not change its action. Do not add external information.\n\n"
+        + json.dumps(facts, ensure_ascii=False, sort_keys=True, default=str)
     )
     return {
         "model": config.model,
@@ -118,4 +120,4 @@ def explain_signal(signal: dict[str, Any], config: ExplanationConfig | None = No
 
 
 if __name__ == "__main__":
-    raise SystemExit("llm_explainer.py is a library component; call explain_signal() from the daily pipeline.")
+    pass
