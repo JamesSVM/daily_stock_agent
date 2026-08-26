@@ -34,10 +34,13 @@ MIN_SCORE = 70.0
 
 
 def load_stock_data(conn: sqlite3.Connection) -> dict[str, pd.DataFrame]:
-    """Load active stocks from daily_price, excluding quarantined tickers."""
+    """Load only active stocks from stock_universe and exclude quarantined tickers."""
     query = """
         SELECT p.stock_id, p.date, p.open, p.high, p.low, p.close, p.volume
         FROM daily_price p
+        INNER JOIN stock_universe u
+            ON u.stock_id = p.stock_id
+           AND u.is_active = 1
         LEFT JOIN price_update_status s ON s.stock_id = p.stock_id
         WHERE COALESCE(s.quarantined, 0) = 0
         ORDER BY p.date, p.stock_id
@@ -114,7 +117,7 @@ def rank_and_select_signals(signals: pd.DataFrame) -> pd.DataFrame:
 def build_signal_sheet(stock_data: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, str]:
     """Calculate V1.5 signals for the latest common market date."""
     if not stock_data:
-        raise ValueError("No stock data found in daily_price.")
+        raise ValueError("No active stock data found in daily_price.")
 
     market = build_market_proxy(stock_data)
     if market.empty:
@@ -187,6 +190,7 @@ def run(db_path: str = DB_PATH, output_path: str = DEFAULT_OUTPUT) -> pd.DataFra
     selected = signals[signals["selected"]] if not signals.empty else signals
     print(f"Signal date: {signals['date'].iloc[0] if not signals.empty else 'N/A'}")
     print(f"Market regime: {regime}")
+    print(f"Universe scanned: {len(stock_data)}")
     print(f"Selected: {len(selected)} / {MAX_POSITIONS}")
     if not selected.empty:
         print(selected[["stock_id", "score", "rs20", "drawdown_20d", "action"]].to_string(index=False))
