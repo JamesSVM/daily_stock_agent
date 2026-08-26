@@ -54,6 +54,25 @@ def _send_failure_alert(error: Exception) -> None:
         print(f"Alert email: failed ({alert_error})")
 
 
+def _run_performance_tracking(env: dict[str, str]) -> None:
+    """Best-effort V1.6 analytics; never blocks the live signal pipeline."""
+    try:
+        run_step(
+            "Build V1.6 performance tracking",
+            [
+                sys.executable,
+                "scripts/build_performance_tracking.py",
+                "--db",
+                str(DB_PATH),
+                "--benchmark-period",
+                "3mo",
+            ],
+            env,
+        )
+    except Exception as error:  # noqa: BLE001 - analytics must not block live delivery
+        print(f"V1.6 performance tracking warning: {error}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the complete daily stock agent")
     parser.add_argument("--send-email", action="store_true")
@@ -103,6 +122,7 @@ def main() -> None:
             command.append("--send-email")
 
         run_step("Generate signal + LLM explanation + report", command, env)
+        _run_performance_tracking(env)
         print("\nDaily stock agent completed successfully.")
     except subprocess.CalledProcessError as error:
         print(f"\nDaily stock agent aborted safely: step failed with exit code {error.returncode}.")
