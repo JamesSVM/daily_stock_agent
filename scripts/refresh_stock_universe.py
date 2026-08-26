@@ -12,10 +12,13 @@ import argparse
 import csv
 import json
 import sqlite3
+import ssl
 import urllib.request
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+import certifi
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = REPO_ROOT / "data" / "database.db"
@@ -26,13 +29,18 @@ TWSE_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
 TPEX_URL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes"
 TARGET_COUNT = 300
 
+# macOS Homebrew Python 3.14 can reject otherwise valid public certificates
+# when its default trust store is incomplete. certifi provides a portable CA
+# bundle without disabling TLS verification.
+SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+
 
 def _fetch_json(url: str) -> list[dict]:
     request = urllib.request.Request(
         url,
         headers={"User-Agent": "daily-stock-agent/1.6"},
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urllib.request.urlopen(request, timeout=30, context=SSL_CONTEXT) as response:
         payload = json.loads(response.read().decode("utf-8"))
     if not isinstance(payload, list):
         raise RuntimeError(f"Unexpected API response from {url}")
