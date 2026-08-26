@@ -11,33 +11,12 @@ returns are measured from that entry open to the close on +1/+3/+5/+10 trading
 days. No future rows are used to create the rank itself.
 """
 
-from dataclasses import dataclass
 from typing import Iterable
 
 import pandas as pd
 
 HORIZONS = (1, 3, 5, 10)
 TOP_BUCKETS = (1, 3, 5, 10)
-
-
-@dataclass(frozen=True)
-class SignalEvent:
-    signal_date: str
-    stock_id: str
-    rank: int
-    score: float
-    market_regime: str
-    close_price: float
-    entry_date: str | None
-    entry_open: float | None
-    return_1d: float | None
-    return_3d: float | None
-    return_5d: float | None
-    return_10d: float | None
-    benchmark_return_1d: float | None
-    benchmark_return_3d: float | None
-    benchmark_return_5d: float | None
-    benchmark_return_10d: float | None
 
 
 def rank_daily_signals(signals: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
@@ -72,6 +51,8 @@ def top_bucket_membership(rank: int) -> tuple[str, ...]:
 
 def _clean_series(df: pd.DataFrame) -> pd.DataFrame:
     data = df.copy()
+    if "Date" in data.columns and "date" not in data.columns:
+        data = data.rename(columns={"Date": "date"})
     data["date"] = pd.to_datetime(data["date"], errors="coerce")
     data = data.dropna(subset=["date"]).sort_values("date")
     for col in ("open", "high", "low", "close", "volume"):
@@ -85,20 +66,24 @@ def forward_returns(
     signal_date: pd.Timestamp,
 ) -> dict[str, object]:
     """Calculate entry-at-next-open and +1/+3/+5/+10 trading-day returns."""
+    empty = {"entry_date": None, "entry_open": None, **{f"return_{h}d": None for h in HORIZONS}}
+    if price_data is None or price_data.empty:
+        return empty
+
     data = _clean_series(price_data)
-    if data.empty:
-        return {"entry_date": None, "entry_open": None, **{f"return_{h}d": None for h in HORIZONS}}
+    if data.empty or "open" not in data.columns or "close" not in data.columns:
+        return empty
 
     data = data.reset_index(drop=True)
     dates = data["date"]
     after = data.index[dates > signal_date]
     if len(after) == 0:
-        return {"entry_date": None, "entry_open": None, **{f"return_{h}d": None for h in HORIZONS}}
+        return empty
 
     entry_idx = int(after[0])
     entry_open = data.loc[entry_idx, "open"]
     if pd.isna(entry_open) or float(entry_open) <= 0:
-        return {"entry_date": None, "entry_open": None, **{f"return_{h}d": None for h in HORIZONS}}
+        return empty
 
     result: dict[str, object] = {
         "entry_date": dates.iloc[entry_idx].date().isoformat(),
@@ -200,19 +185,41 @@ def summarize_bucket_performance(events: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _longest_consecutive_dates(dates: Iterable[str]) -> int:
+    normalized = sorted({pd.to_datetime(value).normalize() for value in dates})
+    if not normalized:
+        return 0
+    longest = current = 1
+    for previous, current_date in zip(normalized, normalized[1:]):
+        if (current_date - previous).days == 1:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 1
+    return longest
+
+
 def summarize_persistence(events: pd.DataFrame) -> pd.DataFrame:
     """Summarize repeated appearances of the same stock in Top-10."""
     if events.empty:
         return pd.DataFrame()
 
-    grouped = events.groupby("stock_id", as_index=False).agg(
-        appearances=("stock_id", "size"),
-        top_1_count=("rank", lambda s: int((s <= 1).sum())),
-        top_3_count=("rank", lambda s: int((s <= 3).sum())),
-        top_5_count=("rank", lambda s: int((s <= 5).sum())),
-        top_10_count=("rank", lambda s: int((s <= 10).sum())),
-        avg_rank=("rank", "mean"),
-        first_signal_date=("signal_date", "min"),
-        last_signal_date=("signal_date", "max"),
-    )
-    return grouped.sort_values(["top_5_count", "top_10_count", "avg_rank", "stock_id"], ascending=[False, False, True, True]).reset_index(drop=True)
+    rows: list[dict[str, object]] = []
+    for stock_id, group in events.groupby("stock_id"):
+        rows.append({
+            "stock_id": stock_id,
+            "appearances": int(len(group)),
+            "top_1_count": int((group["rank"] <= 1).sum()),
+            "top_3_count": int((group["rank"] <= 3).sum()),
+            "top_5_count": int((group["rank"] <= 5).sum()),
+            "top_10_count": int((group["rank"] <= 10).sum()),
+            "avg_rank": float(group["rank"].mean()),
+            "longest_consecutive_top10": _longest_consecutive_dates(group["signal_date"]),
+            "first_signal_date": group["signal_date"].min(),
+            "last_signal_date": group["signal_date"].max(),
+        })
+
+    return pd.DataFrame(rows).sort_values(
+        ["top_5_count", "top_10_count", "avg_rank", "stock_id"],
+        ascending=[False, False, True, True],
+    ).reset_index(drop=True)
