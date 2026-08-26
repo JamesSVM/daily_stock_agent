@@ -67,6 +67,19 @@ def main() -> None:
 
     try:
         run_step(
+            "Refresh stock universe (300 common stocks)",
+            [
+                sys.executable,
+                "scripts/refresh_stock_universe.py",
+                "--db",
+                str(DB_PATH),
+                "--target-count",
+                "300",
+            ],
+            env,
+        )
+
+        run_step(
             "Refresh market data",
             [
                 sys.executable,
