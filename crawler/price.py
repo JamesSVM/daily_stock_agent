@@ -22,6 +22,7 @@ def _fetch_yf_data(ticker, period="6mo"):
         auto_adjust=False,
         progress=False,
         timeout=YF_TIMEOUT_SECONDS,
+        threads=False,
     )
 
     if df.empty:
