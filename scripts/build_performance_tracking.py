@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
+import sys
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import pandas as pd
 
@@ -17,7 +22,6 @@ from engine.performance_tracker import (
 )
 from features.relative_strength import add_relative_strength_features, build_relative_strength_signal
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = REPO_ROOT / "data" / "database.db"
 REPORT_DIR = REPO_ROOT / "reports" / "performance"
 
