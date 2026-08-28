@@ -1,1 +1,0 @@
-# Temporary helper patch placeholder
