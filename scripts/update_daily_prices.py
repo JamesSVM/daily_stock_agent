@@ -5,7 +5,7 @@ import csv
 import sqlite3
 import sys
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -22,6 +22,7 @@ DEFAULT_RETRY_ATTEMPTS = 3
 DEFAULT_RETRY_WAIT_SECONDS = 600
 DEFAULT_MIN_COVERAGE = 0.90
 QUARANTINE_AFTER_FAILURES = 3
+QUARANTINE_RETRY_DAYS = 7
 BENCHMARK_SYMBOL = "^TWII"
 
 
@@ -54,29 +55,39 @@ def _ensure_status_table(conn: sqlite3.Connection) -> None:
 
 
 def _get_active_stock_ids(conn: sqlite3.Connection) -> list[str]:
-    """Return the current universe; keep the old DB fallback for safe upgrades."""
+    """Return active stocks, skipping quarantined tickers until their retry date."""
     table_exists = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='stock_universe'"
     ).fetchone()
 
     if table_exists:
+        cutoff = (datetime.now(TAIPEI_TZ) - timedelta(days=QUARANTINE_RETRY_DAYS)).isoformat()
         rows = conn.execute(
             """
-            SELECT stock_id
-            FROM stock_universe
-            WHERE is_active = 1
-            ORDER BY stock_id
-            """
+            SELECT u.stock_id
+            FROM stock_universe u
+            LEFT JOIN price_update_status s ON s.stock_id = u.stock_id
+            WHERE u.is_active = 1
+              AND (
+                  COALESCE(s.quarantined, 0) = 0
+                  OR s.updated_at < ?
+              )
+            ORDER BY u.stock_id
+            """,
+            (cutoff,),
         ).fetchall()
     else:
+        cutoff = (datetime.now(TAIPEI_TZ) - timedelta(days=QUARANTINE_RETRY_DAYS)).isoformat()
         rows = conn.execute(
             """
             SELECT DISTINCT p.stock_id
             FROM daily_price p
             LEFT JOIN price_update_status s ON s.stock_id = p.stock_id
             WHERE COALESCE(s.quarantined, 0) = 0
+               OR s.updated_at < ?
             ORDER BY p.stock_id
-            """
+            """,
+            (cutoff,),
         ).fetchall()
 
     return [_normalize_stock_id(row[0]) for row in rows if row[0] is not None]
