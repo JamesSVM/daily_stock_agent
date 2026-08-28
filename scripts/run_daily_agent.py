@@ -7,16 +7,12 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-DB_PATH = REPO_ROOT / "data" / "database.db"
-REPORT_PATH = REPO_ROOT / "reports" / "daily_signal.csv"
 ENV_FILE = Path.home() / ".daily_stock_agent.env"
+DB_PATH = REPO_ROOT / "data" / "database.db"
+REPORT_PATH = REPO_ROOT / "reports" / "daily_signal.txt"
 
 
 def _load_env_file(path: Path) -> None:
-    """Load KEY=VALUE settings without overriding explicit shell variables."""
     if not path.exists():
         return
     for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -25,40 +21,31 @@ def _load_env_file(path: Path) -> None:
             continue
         key, value = line.split("=", 1)
         key = key.strip()
-        value = value.strip()
-        if not key:
-            continue
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
-        os.environ.setdefault(key, value)
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
 
 
-def run_step(label: str, command: list[str], env: dict[str, str] | None = None) -> None:
-    print(f"\n=== {label} ===")
+def run_step(name: str, command: list[str], env: dict[str, str]) -> None:
+    print(f"\n=== {name} ===")
     subprocess.run(command, cwd=REPO_ROOT, env=env, check=True)
 
 
 def _send_failure_alert(error: Exception) -> None:
-    """Send a lightweight alert without invoking the LLM/report pipeline."""
     try:
-        from email_notifier import send_email
-
-        body = (
-            "Daily Stock Agent ALERT\n\n"
-            "The market-data refresh did not pass its safety checks.\n"
-            "No trading signal or BUY_NEXT_OPEN report was generated.\n\n"
-            f"Reason: {error}\n\n"
-            "Check reports/launchd.log and reports/launchd.error.log.\n"
-            "If the failure is Yahoo data freshness, the scheduled retry will try again next run."
-        )
-        send_email(body, subject="Daily Stock Agent ALERT - Data Refresh Failed")
-        print("Alert email: sent")
-    except Exception as alert_error:  # noqa: BLE001 - do not hide original refresh failure
+        command = [
+            sys.executable,
+            "email_notifier.py",
+            "--failure",
+            str(error),
+        ]
+        subprocess.run(command, cwd=REPO_ROOT, env=os.environ.copy(), check=False)
+    except Exception as alert_error:  # noqa: BLE001 - alert must never hide root cause
         print(f"Alert email: failed ({alert_error})")
 
 
 def _run_performance_tracking(env: dict[str, str]) -> None:
-    """Best-effort V1.6 analytics; never blocks the live signal pipeline."""
+    print("\n=== Build V1.6 performance tracking ===")
     try:
         run_step(
             "Build V1.6 performance tracking",
@@ -113,7 +100,7 @@ def main() -> None:
                 "--retry-attempts",
                 "3",
                 "--retry-wait-seconds",
-                "600",
+                "10",
                 "--min-coverage",
                 "0.90",
             ],
