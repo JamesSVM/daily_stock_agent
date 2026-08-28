@@ -1,8 +1,17 @@
+import logging
+
 import pandas as pd
 import yfinance as yf
 
 
 YF_TIMEOUT_SECONDS = 15
+
+# yfinance logs expected missing/delisted tickers as ERROR, which makes a normal
+# data-quality condition look like a pipeline failure. Callers record failures
+# themselves, so keep the library's noisy per-download messages out of stdout/
+# stderr while preserving the returned DataFrame/None contract.
+YF_LOGGER = logging.getLogger("yfinance")
+YF_LOGGER.setLevel(logging.CRITICAL + 1)
 
 
 def _fetch_yf_data(ticker, period="6mo"):
@@ -13,6 +22,7 @@ def _fetch_yf_data(ticker, period="6mo"):
         auto_adjust=False,
         progress=False,
         timeout=YF_TIMEOUT_SECONDS,
+        threads=False,
     )
 
     if df.empty:

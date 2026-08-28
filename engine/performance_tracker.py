@@ -49,10 +49,23 @@ def top_bucket_membership(rank: int) -> tuple[str, ...]:
     return tuple(f"top_{bucket}" for bucket in TOP_BUCKETS if rank <= bucket)
 
 
-def _clean_series(df: pd.DataFrame) -> pd.DataFrame:
+def _clean_series(df: pd.DataFrame | None) -> pd.DataFrame:
+    """Normalize price data and safely return empty for malformed input."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
+
     data = df.copy()
     if "Date" in data.columns and "date" not in data.columns:
         data = data.rename(columns={"Date": "date"})
+
+    # Some callers store the trading date in the DatetimeIndex rather than as a
+    # column. Convert it back to the explicit schema expected by the tracker.
+    if "date" not in data.columns and isinstance(data.index, pd.DatetimeIndex):
+        data = data.reset_index().rename(columns={data.index.name or "index": "date"})
+
+    if "date" not in data.columns:
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
+
     data["date"] = pd.to_datetime(data["date"], errors="coerce")
     data = data.dropna(subset=["date"]).sort_values("date")
     for col in ("open", "high", "low", "close", "volume"):
