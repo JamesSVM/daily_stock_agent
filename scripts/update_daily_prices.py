@@ -19,7 +19,7 @@ from crawler.price import get_price
 
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 DEFAULT_RETRY_ATTEMPTS = 3
-DEFAULT_RETRY_WAIT_SECONDS = 600
+DEFAULT_RETRY_WAIT_SECONDS = 10
 DEFAULT_MIN_COVERAGE = 0.90
 QUARANTINE_AFTER_FAILURES = 3
 QUARANTINE_RETRY_DAYS = 7
@@ -60,8 +60,8 @@ def _get_active_stock_ids(conn: sqlite3.Connection) -> list[str]:
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='stock_universe'"
     ).fetchone()
 
+    cutoff = (datetime.now(TAIPEI_TZ) - timedelta(days=QUARANTINE_RETRY_DAYS)).isoformat()
     if table_exists:
-        cutoff = (datetime.now(TAIPEI_TZ) - timedelta(days=QUARANTINE_RETRY_DAYS)).isoformat()
         rows = conn.execute(
             """
             SELECT u.stock_id
@@ -77,7 +77,6 @@ def _get_active_stock_ids(conn: sqlite3.Connection) -> list[str]:
             (cutoff,),
         ).fetchall()
     else:
-        cutoff = (datetime.now(TAIPEI_TZ) - timedelta(days=QUARANTINE_RETRY_DAYS)).isoformat()
         rows = conn.execute(
             """
             SELECT DISTINCT p.stock_id
@@ -188,12 +187,56 @@ def _upsert_stock_history(conn: sqlite3.Connection, stock_id: str, df: pd.DataFr
     return len(rows)
 
 
-def _fetch_benchmark_date() -> date:
+def _fetch_benchmark_date() -> date | None:
     benchmark = get_price(BENCHMARK_SYMBOL, period="5d")
-    latest = _latest_date(benchmark)
-    if latest is None:
-        raise RuntimeError(f"Unable to fetch benchmark {BENCHMARK_SYMBOL} from Yahoo Finance.")
-    return latest
+    return _latest_date(benchmark)
+
+
+def _fallback_expected_date(conn: sqlite3.Connection, stock_ids: list[str]) -> date | None:
+    """Use the most common latest stock date when Yahoo benchmark is unavailable."""
+    if not stock_ids:
+        return None
+    placeholders = ",".join("?" for _ in stock_ids)
+    rows = conn.execute(
+        f"""
+        SELECT date, COUNT(*) AS stock_count
+        FROM daily_price
+        WHERE stock_id IN ({placeholders})
+        GROUP BY date
+        ORDER BY stock_count DESC, date DESC
+        LIMIT 1
+        """,
+        stock_ids,
+    ).fetchone()
+    if not rows or not rows[0]:
+        return None
+    return date.fromisoformat(str(rows[0]))
+
+
+def _resolve_expected_date(
+    conn: sqlite3.Connection,
+    stock_ids: list[str],
+    retry_attempts: int,
+    retry_wait_seconds: int,
+) -> tuple[date | None, bool]:
+    """Return expected market date and whether it came from the TAIEX benchmark."""
+    for attempt in range(1, retry_attempts + 1):
+        expected = _fetch_benchmark_date()
+        if expected is not None:
+            return expected, True
+        print(f"Benchmark retry {attempt}/{retry_attempts}: {BENCHMARK_SYMBOL} unavailable")
+        if attempt < retry_attempts:
+            time.sleep(retry_wait_seconds)
+
+    fallback = _fallback_expected_date(conn, stock_ids)
+    if fallback is not None:
+        print(
+            f"Benchmark warning: {BENCHMARK_SYMBOL} unavailable; "
+            f"using stock-data date {fallback} as freshness anchor."
+        )
+        return fallback, False
+
+    return None, False
 
 
 def _coverage(conn: sqlite3.Connection, stock_ids: list[str], expected_date: date) -> tuple[float, list[str]]:
@@ -279,23 +322,41 @@ def update_database(
 
         conn.commit()
 
-        expected_date = _fetch_benchmark_date()
+        expected_date, benchmark_used = _resolve_expected_date(
+            conn,
+            stock_ids,
+            retry_attempts=retry_attempts,
+            retry_wait_seconds=retry_wait_seconds,
+        )
+        if expected_date is None:
+            raise RuntimeError(
+                "Unable to establish a market-data freshness date from Yahoo benchmark "
+                f"{BENCHMARK_SYMBOL} or existing stock data."
+            )
+
         today = datetime.now(TAIPEI_TZ).date()
         if require_today and today.weekday() < 5 and expected_date != today:
             for attempt in range(1, retry_attempts + 1):
                 print(
                     f"Freshness retry {attempt}/{retry_attempts}: "
-                    f"Yahoo benchmark date={expected_date}, expected={today}"
+                    f"Yahoo benchmark/date={expected_date}, expected={today}"
                 )
                 if attempt < retry_attempts:
                     time.sleep(retry_wait_seconds)
-                    expected_date = _fetch_benchmark_date()
+                    refreshed, refreshed_from_benchmark = _resolve_expected_date(
+                        conn,
+                        stock_ids,
+                        retry_attempts=1,
+                        retry_wait_seconds=retry_wait_seconds,
+                    )
+                    if refreshed is not None:
+                        expected_date = refreshed
+                        benchmark_used = refreshed_from_benchmark
                     if expected_date == today:
                         break
             if expected_date != today:
                 raise RuntimeError(
-                    f"Market data is stale: Yahoo {BENCHMARK_SYMBOL} latest date="
-                    f"{expected_date}, expected={today}. No signal generated."
+                    f"Market data is stale: latest date={expected_date}, expected={today}. No signal generated."
                 )
 
         coverage, stale_ids = _coverage(conn, stock_ids, expected_date)
@@ -331,7 +392,7 @@ def update_database(
                 f"Stale/missing stocks={len(stale_ids)}. No signal generated."
             )
 
-    print(f"Benchmark date: {expected_date}")
+    print(f"Market data date: {expected_date} ({'TAIEX benchmark' if benchmark_used else 'stock-data fallback'})")
     print(f"Freshness coverage: {coverage:.1%}")
     print(f"Updated stocks: {stocks_updated}")
     print(f"Upserted rows: {rows_upserted}")
@@ -347,7 +408,7 @@ def main() -> None:
     parser.add_argument("--retry-attempts", type=int, default=DEFAULT_RETRY_ATTEMPTS)
     parser.add_argument("--retry-wait-seconds", type=int, default=DEFAULT_RETRY_WAIT_SECONDS)
     parser.add_argument("--min-coverage", type=float, default=DEFAULT_MIN_COVERAGE)
-    parser.add_argument("--allow-stale-date", action="store_true", help="Do not require Yahoo benchmark date to equal today")
+    parser.add_argument("--allow-stale-date", action="store_true", help="Do not require Yahoo/stock-data date to equal today")
     args = parser.parse_args()
     update_database(
         args.db,
