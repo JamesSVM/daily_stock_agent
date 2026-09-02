@@ -9,7 +9,6 @@ positions. Total capital is metadata only and never drives a BUY decision.
 """
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
 import json
 from pathlib import Path
 from typing import Any
@@ -47,9 +46,6 @@ def _normalise_config(raw: dict[str, Any]) -> PortfolioConfig:
 def load_portfolio_state(path: str | Path = DEFAULT_STATE_PATH) -> PortfolioState:
     path = Path(path)
     if not path.exists():
-        # Missing state is treated as an unconfigured portfolio, but this does
-        # not block signal scanning. It simply prevents HOLD classification for
-        # unknown user positions.
         return PortfolioState(config=PortfolioConfig(), configured=False, source=str(path))
 
     raw = json.loads(path.read_text(encoding="utf-8"))
@@ -109,11 +105,13 @@ def apply_portfolio_decisions(
     signals,
     state: PortfolioState,
     *,
-    signal_date: date,
+    signal_date,
     max_candidates: int = 10,
 ):
-    """Rank candidates and apply the three explicit V1.6 portfolio gates.
+    """Apply V1.6 gates to every V1.5 candidate.
 
+    ``max_candidates`` is a report/display limit only. It does not restrict
+    which candidates receive portfolio decisions or become BUYs.
     There is no cash check, position sizing, daily trade quota, monthly trade
     quota, or forced Top-N BUY quota in this version.
     """
@@ -123,6 +121,7 @@ def apply_portfolio_decisions(
     if result.empty:
         for column, dtype in {
             "selected": bool,
+            "top_candidate": bool,
             "action": str,
             "trade_score": float,
             "portfolio_reason": str,
@@ -139,16 +138,23 @@ def apply_portfolio_decisions(
     ).reset_index(drop=True)
 
     result["selected"] = False
+    result["top_candidate"] = False
     result["action"] = "WATCH"
     result["trade_score"] = result["score"].astype(float)
     result["portfolio_reason"] = result["candidate"].map(
-        lambda value: "not_in_top_candidate_set" if not bool(value) else "not_selected"
+        lambda value: "not_candidate" if not bool(value) else "not_selected"
     )
     result["configured"] = state.configured
     result["total_capital"] = state.config.total_capital
     result["position_count"] = state.position_count
 
-    candidate_idx = result.index[result["candidate"]].tolist()[:max_candidates]
+    candidate_idx = result.index[result["candidate"]].tolist()
+    top_candidate_idx = candidate_idx[:max_candidates]
+    if top_candidate_idx:
+        result.loc[top_candidate_idx, "top_candidate"] = True
+
+    # Portfolio decisions are evaluated against the full V1.5 candidate pool.
+    # The Top 10 marker above is display-only and never controls BUY selection.
     for idx in candidate_idx:
         row = result.loc[idx]
         decision = decide_action(
