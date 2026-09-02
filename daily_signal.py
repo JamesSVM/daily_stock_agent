@@ -186,13 +186,15 @@ def run(
 
     selected = signals[signals["selected"]] if not signals.empty else signals
     candidates = signals[signals["candidate"]] if not signals.empty else signals
+    top_candidates = signals[signals["top_candidate"]] if not signals.empty else signals
     signal_date = signals["date"].iloc[0] if not signals.empty else "N/A"
 
     print(f"Signal date: {signal_date}")
     print(f"Market regime: {regime}")
     print(f"Universe scanned: {len(stock_data)}")
-    print(f"Trade candidates (Top {MAX_CANDIDATES} cap): {len(candidates)}")
-    print(f"Selected BUYs: {len(selected)}")
+    print(f"V1.5 trade candidates: {len(candidates)}")
+    print(f"Top {MAX_CANDIDATES} candidates shown: {len(top_candidates)}")
+    print(f"Selected BUYs after V1.6 gates: {len(selected)}")
     if not selected.empty:
         print(
             selected[
