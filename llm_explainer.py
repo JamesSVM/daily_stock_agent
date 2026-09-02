@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Explain deterministic V1.5 signals with a local Ollama model."""
+"""Explain deterministic V1.6 portfolio-aware signals with local Ollama."""
 
 import json
 import os
@@ -14,13 +14,13 @@ DEFAULT_TIMEOUT_SECONDS = 120
 
 SYSTEM_PROMPT = """你是台灣股票短線交易系統的「解釋層」。
 
-你的工作只是解釋策略引擎已經產生的確定性訊號。
-你絕對不能自行產生、修改或否決 BUY/SELL/HOLD 決策，也不能捏造資料或使用外部市場資訊。
+你的工作只是解釋策略引擎已經產生的確定性決策。
+你絕對不能自行產生、修改或否決 BUY/SELL/HOLD/WATCH/NO_TRADE 決策，也不能捏造資料或使用外部市場資訊。
 
 請使用繁體中文（zh-TW）回答，只解釋：
-1. 為什麼策略選中這檔股票。
+1. 為什麼策略引擎給出目前的 action。
 2. 數值中最重要的支持因素。
-3. 從提供的數值可以看到的主要風險或弱點。
+3. 資金、持倉或市場環境造成的主要限制。
 4. 一段簡潔、中性的總結。
 
 策略引擎才是最終權威；所有提供的數值都視為事實。
@@ -46,10 +46,16 @@ class ExplanationConfig:
 
 
 def _build_payload(signal: dict[str, Any], config: ExplanationConfig) -> dict[str, Any]:
-    facts = {key: signal.get(key) for key in (
-        "date", "stock_id", "market_regime", "close", "rs20", "rs60",
-        "drawdown_20d", "score", "trend_pass", "momentum_pass", "pullback_pass",
-        "candidate", "selected", "action", "reason")}
+    facts = {
+        key: signal.get(key)
+        for key in (
+            "date", "stock_id", "market_regime", "close", "rs20", "rs60",
+            "drawdown_20d", "score", "trade_score", "trend_pass", "momentum_pass",
+            "pullback_pass", "candidate", "selected", "action", "reason",
+            "allocation_amount", "allocation_pct", "portfolio_reason",
+            "remaining_slots", "monthly_trades_used", "configured",
+        )
+    }
     user_prompt = (
         "請用繁體中文（zh-TW）解釋以下策略輸出。不得改變 action，也不得加入外部資訊。\n"
         "Do not change its action. Do not add external information.\n\n"
@@ -69,7 +75,12 @@ def _build_payload(signal: dict[str, Any], config: ExplanationConfig) -> dict[st
 
 def _post_json(url: str, payload: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+    req = request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
     try:
         with request.urlopen(req, timeout=timeout_seconds) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -78,7 +89,9 @@ def _post_json(url: str, payload: dict[str, Any], timeout_seconds: int) -> dict[
             detail = exc.read().decode("utf-8", errors="replace").strip()
         except Exception:
             detail = ""
-        raise RuntimeError(f"Ollama HTTP {exc.code} at {url}. Response: {detail or '<empty>'}") from exc
+        raise RuntimeError(
+            f"Ollama HTTP {exc.code} at {url}. Response: {detail or '<empty>'}"
+        ) from exc
     except error.URLError as exc:
         raise RuntimeError(f"Unable to reach Ollama at {url}: {exc}") from exc
     except json.JSONDecodeError as exc:
@@ -106,16 +119,25 @@ def explain_signal(signal: dict[str, Any], config: ExplanationConfig | None = No
             raise RuntimeError(f"Ollama explanation missing required field: {key}")
     if not isinstance(explanation["summary"], str):
         raise RuntimeError("Ollama explanation summary must be a string.")
-    if not isinstance(explanation["strengths"], list) or not all(isinstance(x, str) for x in explanation["strengths"]):
+    if not isinstance(explanation["strengths"], list) or not all(
+        isinstance(x, str) for x in explanation["strengths"]
+    ):
         raise RuntimeError("Ollama explanation strengths must be a list of strings.")
-    if not isinstance(explanation["risks"], list) or not all(isinstance(x, str) for x in explanation["risks"]):
+    if not isinstance(explanation["risks"], list) or not all(
+        isinstance(x, str) for x in explanation["risks"]
+    ):
         raise RuntimeError("Ollama explanation risks must be a list of strings.")
     return {
-        "date": signal.get("date"), "stock_id": signal.get("stock_id"),
-        "action": signal.get("action"), "selected": bool(signal.get("selected", False)),
-        "score": signal.get("score"), "rs20": signal.get("rs20"),
-        "drawdown_20d": signal.get("drawdown_20d"), "market_regime": signal.get("market_regime"),
-        **explanation, "model": config.model,
+        "date": signal.get("date"),
+        "stock_id": signal.get("stock_id"),
+        "action": signal.get("action"),
+        "selected": bool(signal.get("selected", False)),
+        "score": signal.get("score"),
+        "rs20": signal.get("rs20"),
+        "drawdown_20d": signal.get("drawdown_20d"),
+        "market_regime": signal.get("market_regime"),
+        **explanation,
+        "model": config.model,
     }
 
 

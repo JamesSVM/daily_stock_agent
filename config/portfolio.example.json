@@ -1,0 +1,19 @@
+{
+  "config": {
+    "total_capital": 0,
+    "cash_available": 0,
+    "max_positions": 5,
+    "max_position_pct": 0.20,
+    "target_position_pct": 0.15,
+    "max_daily_trades": 1,
+    "max_monthly_trades": 10,
+    "min_score": 85,
+    "min_order_amount": 1000,
+    "bear_market_entry": false
+  },
+  "positions": {
+    "2330": 0
+  },
+  "trade_history": [],
+  "last_exit_dates": {}
+}
