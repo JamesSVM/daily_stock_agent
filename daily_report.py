@@ -2,8 +2,9 @@ from __future__ import annotations
 
 """End-to-end V1.6 daily report pipeline.
 
-Signal generation and portfolio allocation are deterministic. Ollama only
-explains BUY decisions. Email is notification-only and never places orders.
+Quantitative signal generation and portfolio eligibility are deterministic.
+Local Ollama only prioritizes the eligible candidate pool into Top 3 and
+explains those three recommendations. Email is notification-only.
 """
 
 import argparse
@@ -19,43 +20,39 @@ from daily_signal import (
     load_stock_data,
 )
 from email_notifier import render_report, send_email
-from llm_explainer import explain_signal
+from llm_explainer import rank_top_candidates
+
+TOP_RECOMMENDATIONS = 3
 
 
-def _fallback_explanation(signal: dict[str, Any], error: Exception) -> dict[str, Any]:
-    """Keep report delivery alive when optional local LLM explanation fails."""
-    action = signal.get("action") or "UNKNOWN"
-    reason = signal.get("portfolio_reason") or signal.get("reason") or "No portfolio reason provided."
-    score = signal.get("score")
-    rs20 = signal.get("rs20")
-    rs60 = signal.get("rs60")
-    pullback = signal.get("drawdown_20d")
-    regime = signal.get("market_regime")
-
-    strengths: list[str] = []
-    for label, value in (("score", score), ("RS20", rs20), ("RS60", rs60), ("Pullback", pullback)):
-        if value is not None:
-            strengths.append(f"{label}={value}")
-
-    risks = [f"Portfolio decision: {reason}"]
-    if regime:
-        risks.append(f"Market regime: {regime}")
-    risks.append(f"LLM explanation unavailable: {type(error).__name__}")
-
-    return {
-        "date": signal.get("date"),
-        "stock_id": signal.get("stock_id"),
-        "action": action,
-        "selected": bool(signal.get("selected", False)),
-        "score": score,
-        "rs20": rs20,
-        "drawdown_20d": pullback,
-        "market_regime": regime,
-        "summary": f"Deterministic engine action is {action}. {reason}",
-        "strengths": strengths,
-        "risks": risks,
-        "model": "unavailable",
-    }
+def _fallback_top3(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deterministic fallback when Ollama is unavailable."""
+    ranked = sorted(
+        candidates,
+        key=lambda item: (
+            float(item.get("score") or 0.0),
+            float(item.get("rs20") or 0.0),
+            float(item.get("rs60") or 0.0),
+        ),
+        reverse=True,
+    )
+    results: list[dict[str, Any]] = []
+    for rank, item in enumerate(ranked[:TOP_RECOMMENDATIONS], start=1):
+        results.append(
+            {
+                "stock_id": str(item.get("stock_id")),
+                "rank": rank,
+                "reason": "Ollama unavailable; deterministic fallback prioritized higher Score, then RS20 and RS60.",
+                "strengths": [
+                    f"Score={item.get('score')}",
+                    f"RS20={item.get('rs20')}",
+                    f"RS60={item.get('rs60')}",
+                ],
+                "risks": ["AI ranking unavailable for this report."],
+                "model": "fallback",
+            }
+        )
+    return results
 
 
 def run(
@@ -78,21 +75,29 @@ def run(
         signal_date = str(signals["date"].iloc[0])
         signal_rows = signals.to_dict(orient="records")
 
-    selected = [row for row in signal_rows if row.get("selected")]
-    explanations = []
-    for row in selected:
+    eligible = [row for row in signal_rows if row.get("selected")]
+    recommendations: list[dict[str, Any]] = []
+    if eligible:
         try:
-            explanations.append(explain_signal(row))
+            recommendations = rank_top_candidates(eligible)
         except Exception as error:  # noqa: BLE001 - LLM is optional to report delivery
             print(
-                f"LLM explanation warning for {row.get('stock_id')}: "
+                "AI Top-3 ranking warning: "
                 f"{type(error).__name__}: {error}"
             )
-            explanations.append(_fallback_explanation(row, error))
+            recommendations = _fallback_top3(eligible)
+
+    recommendation_by_stock = {
+        str(item.get("stock_id")): item for item in recommendations
+    }
+    for row in signal_rows:
+        rec = recommendation_by_stock.get(str(row.get("stock_id")))
+        row["ai_recommended"] = bool(rec)
+        row["ai_rank"] = rec.get("rank") if rec else None
 
     report = render_report(
         signal_rows,
-        explanations,
+        recommendations,
         market_regime=regime,
         signal_date=signal_date,
     )
