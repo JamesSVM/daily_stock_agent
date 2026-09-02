@@ -9,6 +9,7 @@ explains BUY decisions. Email is notification-only and never places orders.
 import argparse
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 from daily_signal import (
     DB_PATH,
@@ -19,6 +20,42 @@ from daily_signal import (
 )
 from email_notifier import render_report, send_email
 from llm_explainer import explain_signal
+
+
+def _fallback_explanation(signal: dict[str, Any], error: Exception) -> dict[str, Any]:
+    """Keep report delivery alive when optional local LLM explanation fails."""
+    action = signal.get("action") or "UNKNOWN"
+    reason = signal.get("portfolio_reason") or signal.get("reason") or "No portfolio reason provided."
+    score = signal.get("score")
+    rs20 = signal.get("rs20")
+    rs60 = signal.get("rs60")
+    pullback = signal.get("drawdown_20d")
+    regime = signal.get("market_regime")
+
+    strengths: list[str] = []
+    for label, value in (("score", score), ("RS20", rs20), ("RS60", rs60), ("Pullback", pullback)):
+        if value is not None:
+            strengths.append(f"{label}={value}")
+
+    risks = [f"Portfolio decision: {reason}"]
+    if regime:
+        risks.append(f"Market regime: {regime}")
+    risks.append(f"LLM explanation unavailable: {type(error).__name__}")
+
+    return {
+        "date": signal.get("date"),
+        "stock_id": signal.get("stock_id"),
+        "action": action,
+        "selected": bool(signal.get("selected", False)),
+        "score": score,
+        "rs20": rs20,
+        "drawdown_20d": pullback,
+        "market_regime": regime,
+        "summary": f"Deterministic engine action is {action}. {reason}",
+        "strengths": strengths,
+        "risks": risks,
+        "model": "unavailable",
+    }
 
 
 def run(
@@ -42,7 +79,17 @@ def run(
         signal_rows = signals.to_dict(orient="records")
 
     selected = [row for row in signal_rows if row.get("selected")]
-    explanations = [explain_signal(row) for row in selected]
+    explanations = []
+    for row in selected:
+        try:
+            explanations.append(explain_signal(row))
+        except Exception as error:  # noqa: BLE001 - LLM is optional to report delivery
+            print(
+                f"LLM explanation warning for {row.get('stock_id')}: "
+                f"{type(error).__name__}: {error}"
+            )
+            explanations.append(_fallback_explanation(row, error))
+
     report = render_report(
         signal_rows,
         explanations,
