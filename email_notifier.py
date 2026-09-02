@@ -14,90 +14,66 @@ from typing import Any
 
 def render_report(
     signals: list[dict[str, Any]],
-    explanations: list[dict[str, Any]],
+    recommendations: list[dict[str, Any]],
     *,
     market_regime: str,
     signal_date: str,
 ) -> str:
-    """Render deterministic signal facts plus optional LLM explanations."""
-    explanation_by_stock = {str(item.get("stock_id")): item for item in explanations}
-    selected = [item for item in signals if item.get("selected")]
-    top_candidates = [item for item in signals if item.get("top_candidate")]
+    """Render the quantitative candidate summary and AI-selected Top 3."""
     candidates = [item for item in signals if item.get("candidate")]
+    eligible = [item for item in signals if item.get("selected")]
+    signal_by_stock = {str(item.get("stock_id")): item for item in signals}
     snapshot = signals[0] if signals else {}
     total_capital = snapshot.get("total_capital", 0)
     position_count = snapshot.get("position_count", 0)
 
     lines = [
-        "Daily Stock Agent V1.6",
+        "Daily Stock Agent V1.6.1",
         f"Date: {signal_date}",
         f"Market regime: {market_regime}",
         "",
         "Portfolio context",
         f"  Total capital: ${float(total_capital):,.0f}" if total_capital else "  Total capital: not configured",
         f"  Known holdings: {position_count}",
-        "  Cash availability / position sizing: not used in V1.6",
+        "  Cash availability / position sizing: not used",
         "",
-        "BUY recommendations",
+        "AI TOP 3 RECOMMENDATIONS",
     ]
 
-    if selected:
-        for index, signal in enumerate(selected, start=1):
-            stock_id = str(signal.get("stock_id"))
-            explanation = explanation_by_stock.get(stock_id, {})
+    if recommendations:
+        for rec in recommendations:
+            stock_id = str(rec.get("stock_id"))
+            signal = signal_by_stock.get(stock_id, {})
             lines.extend(
                 [
                     "",
-                    f"{index}. {stock_id} | {signal.get('action')} | score={signal.get('score')} | TradeScore={signal.get('trade_score')}",
-                    f"   RS20: {signal.get('rs20')} | Pullback: {signal.get('drawdown_20d')}",
-                    f"   Decision: {signal.get('portfolio_reason')}",
-                    f"   Summary: {explanation.get('summary', 'No explanation available.')}",
+                    f"{rec.get('rank')}. {stock_id} | {signal.get('action')} | score={signal.get('score')}",
+                    f"   RS20: {signal.get('rs20')} | RS60: {signal.get('rs60')} | Pullback: {signal.get('drawdown_20d')}",
+                    f"   Why selected: {rec.get('reason')}",
                 ]
             )
-            if explanation.get("strengths"):
-                lines.append("   Strengths: " + "; ".join(explanation["strengths"]))
-            if explanation.get("risks"):
-                lines.append("   Risks: " + "; ".join(explanation["risks"]))
+            if rec.get("strengths"):
+                lines.append("   Strengths: " + "; ".join(str(x) for x in rec["strengths"]))
+            if rec.get("risks"):
+                lines.append("   Key risk: " + "; ".join(str(x) for x in rec["risks"]))
     else:
-        lines.append("NO NEW BUY TODAY.")
+        lines.append("NO TOP-3 RECOMMENDATION TODAY.")
         if market_regime.upper() == "BEAR":
             lines.append("Reason: new entries are blocked in BEAR regime by default.")
         elif not candidates:
             lines.append("Reason: no stock met the V1.5 candidate rules.")
-        else:
-            reasons = [str(item.get("portfolio_reason")) for item in candidates if item.get("portfolio_reason")]
-            if reasons:
-                lines.append(f"Reason: {max(set(reasons), key=reasons.count)}.")
+        elif not eligible:
+            lines.append("Reason: no candidate passed the V1.6 entry gates.")
 
     lines.extend(
         [
             "",
-            f"Top {len(top_candidates)} candidates (display only; not an automatic recommendation list)",
-        ]
-    )
-    if top_candidates:
-        for index, item in enumerate(top_candidates, start=1):
-            lines.append(
-                f"  {index}. {item.get('stock_id')} | score={item.get('score')} | "
-                f"action={item.get('action')} | {item.get('portfolio_reason')}"
-            )
-    else:
-        lines.append("  No V1.5 candidates today.")
-
-    non_buy_candidates = [item for item in top_candidates if not item.get("selected")]
-    if non_buy_candidates:
-        lines.append("")
-        lines.append("Why top candidates were not BUY")
-        for item in non_buy_candidates[:5]:
-            lines.append(
-                f"  {item.get('stock_id')} | {item.get('portfolio_reason')}"
-            )
-
-    lines.extend(
-        [
+            "Quantitative candidate summary",
+            f"  V1.5 candidates: {len(candidates)}",
+            f"  V1.6 eligible for AI ranking: {len(eligible)}",
+            f"  AI recommendations: {len(recommendations)}",
             "",
-            f"V1.5 candidate pool: {len(candidates)} | BUY recommendations: {len(selected)}",
-            "Strategy decisions are deterministic; LLM output is explanation-only.",
+            "The quantitative engine determines eligibility. AI only prioritizes the eligible pool into Top 3 and explains the selection.",
         ]
     )
     return "\n".join(lines)
