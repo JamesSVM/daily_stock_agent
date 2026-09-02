@@ -2,10 +2,10 @@ from __future__ import annotations
 
 """Generate the daily V1.6 portfolio-aware live-trading signal sheet.
 
-The V1.5 stock-selection rules are preserved as the signal layer. V1.6 adds a
-portfolio decision layer so the system may return 0 or 1 new BUY decisions based
-on capital, position limits, trading-frequency limits, current holdings and market
-regime. No quota forces a trade.
+V1.5 remains the deterministic stock-selection layer. V1.6 adds only the
+portfolio rules currently chosen for live use: minimum score, BEAR-market entry
+block, and HOLD for stocks already in the user's portfolio. Total capital is
+optional metadata and does not control BUY sizing or cash availability.
 """
 
 import argparse
@@ -38,7 +38,7 @@ MAX_CANDIDATES = 10
 
 
 def load_stock_data(conn: sqlite3.Connection) -> dict[str, pd.DataFrame]:
-    """Load only active stocks from stock_universe and exclude quarantined tickers."""
+    """Load only active, non-quarantined stocks from the local database."""
     query = """
         SELECT p.stock_id, p.date, p.open, p.high, p.low, p.close, p.volume
         FROM daily_price p
@@ -74,7 +74,6 @@ def load_stock_data(conn: sqlite3.Connection) -> dict[str, pd.DataFrame]:
             }
         )
         result[stock_id] = data
-
     return result
 
 
@@ -86,7 +85,7 @@ def is_v15_candidate(
     trend_pass: bool,
     momentum_pass: bool,
 ) -> bool:
-    """Keep the frozen V1.5 signal definition as the first-stage candidate gate."""
+    """Apply the frozen V1.5 technical candidate definition."""
     return (
         rs20 > RS_THRESHOLD
         and PULLBACK_MIN <= drawdown_20d <= PULLBACK_MAX
@@ -101,7 +100,7 @@ def build_signal_sheet(
     *,
     portfolio_state_path: str | Path = DEFAULT_PORTFOLIO_STATE,
 ) -> tuple[pd.DataFrame, str]:
-    """Calculate V1.5 signals, then apply V1.6 portfolio-aware decisions."""
+    """Calculate V1.5 signals and apply the simplified V1.6 portfolio gates."""
     if not stock_data:
         raise ValueError("No active stock data found in daily_price.")
 
@@ -124,7 +123,6 @@ def build_signal_sheet(
 
         row = data.loc[latest_date]
         signal = build_relative_strength_signal(row)
-
         rs20 = float(row.get("rs20", 0.0))
         drawdown = float(row.get("drawdown_20d", 0.0))
         score = float(signal["score"])
@@ -137,10 +135,9 @@ def build_signal_sheet(
             trend_pass=trend_pass,
             momentum_pass=momentum_pass,
         )
-
         rows.append(
             {
-                "date": latest_date.date().isoformat(),
+                "date": signal_date.isoformat(),
                 "stock_id": stock_id,
                 "market_regime": latest_regime,
                 "close": float(row["Close"]),
@@ -160,16 +157,14 @@ def build_signal_sheet(
     if signals.empty:
         return signals, latest_regime
 
-    portfolio_state = load_portfolio_state(portfolio_state_path)
-    return (
-        apply_portfolio_decisions(
-            signals,
-            portfolio_state,
-            signal_date=signal_date,
-            max_candidates=MAX_CANDIDATES,
-        ),
-        latest_regime,
+    state = load_portfolio_state(portfolio_state_path)
+    signals = apply_portfolio_decisions(
+        signals,
+        state,
+        signal_date=signal_date,
+        max_candidates=MAX_CANDIDATES,
     )
+    return signals, latest_regime
 
 
 def run(
@@ -196,19 +191,12 @@ def run(
     print(f"Signal date: {signal_date}")
     print(f"Market regime: {regime}")
     print(f"Universe scanned: {len(stock_data)}")
-    print(f"Trade candidates: {len(candidates)}")
+    print(f"Trade candidates (Top {MAX_CANDIDATES} cap): {len(candidates)}")
     print(f"Selected BUYs: {len(selected)}")
     if not selected.empty:
         print(
             selected[
-                [
-                    "stock_id",
-                    "score",
-                    "rs20",
-                    "drawdown_20d",
-                    "action",
-                    "allocation_amount",
-                ]
+                ["stock_id", "score", "rs20", "drawdown_20d", "action", "portfolio_reason"]
             ].to_string(index=False)
         )
     else:
@@ -224,7 +212,7 @@ def main() -> None:
     parser.add_argument(
         "--portfolio-state",
         default=DEFAULT_PORTFOLIO_STATE,
-        help="JSON file containing capital, positions and trade history",
+        help="JSON file containing optional total capital and current holdings",
     )
     args = parser.parse_args()
     run(
