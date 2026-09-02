@@ -5,17 +5,11 @@ from __future__ import annotations
 Notification-only: this module never places or modifies trading orders.
 """
 
+import argparse
 import os
 import smtplib
 from email.message import EmailMessage
 from typing import Any
-
-
-def _money(value: Any) -> str:
-    try:
-        return f"${float(value):,.0f}"
-    except (TypeError, ValueError):
-        return "N/A"
 
 
 def render_report(
@@ -25,71 +19,59 @@ def render_report(
     market_regime: str,
     signal_date: str,
 ) -> str:
-    """Render deterministic portfolio-aware facts plus optional LLM explanations."""
+    """Render deterministic signal facts plus optional LLM explanations."""
     explanation_by_stock = {str(item.get("stock_id")): item for item in explanations}
     selected = [item for item in signals if item.get("selected")]
     candidates = [item for item in signals if item.get("candidate")]
-
     snapshot = signals[0] if signals else {}
-    configured = bool(snapshot.get("configured", False))
-    total_capital = snapshot.get("portfolio_total_capital")
-    cash_available = snapshot.get("portfolio_cash_available")
-    position_count = snapshot.get("portfolio_position_count")
-    max_positions = snapshot.get("portfolio_max_positions")
-    monthly_used = snapshot.get("monthly_trades_used")
-    monthly_limit = snapshot.get("portfolio_max_monthly_trades")
+    total_capital = snapshot.get("total_capital", 0)
+    position_count = snapshot.get("position_count", 0)
 
     lines = [
         "Daily Stock Agent V1.6",
         f"Date: {signal_date}",
         f"Market regime: {market_regime}",
         "",
-        "Portfolio snapshot",
-        f"  Configured: {'YES' if configured else 'NO'}",
-        f"  Capital: {_money(total_capital)}",
-        f"  Cash available: {_money(cash_available)}",
-        f"  Positions: {position_count if position_count is not None else 'N/A'} / {max_positions if max_positions is not None else 'N/A'}",
-        f"  Monthly trades: {monthly_used if monthly_used is not None else 'N/A'} / {monthly_limit if monthly_limit is not None else 'N/A'}",
+        "Portfolio context",
+        f"  Total capital: ${float(total_capital):,.0f}" if total_capital else "  Total capital: not configured",
+        f"  Known holdings: {position_count}",
+        "  Cash availability / position sizing: not used in V1.6",
         "",
         "Today's decision",
     ]
 
     if selected:
         for index, signal in enumerate(selected, start=1):
+            stock_id = str(signal.get("stock_id"))
+            explanation = explanation_by_stock.get(stock_id, {})
             lines.extend(
                 [
                     "",
-                    f"{index}. {signal.get('stock_id')} | {signal.get('action')} | score={signal.get('score')} | TradeScore={signal.get('trade_score')}",
-                    f"   Allocation: {_money(signal.get('allocation_amount'))} ({float(signal.get('allocation_pct', 0.0)) * 100:.1f}%)",
+                    f"{index}. {stock_id} | {signal.get('action')} | score={signal.get('score')} | TradeScore={signal.get('trade_score')}",
                     f"   RS20: {signal.get('rs20')} | Pullback: {signal.get('drawdown_20d')}",
                     f"   Decision: {signal.get('portfolio_reason')}",
+                    f"   Summary: {explanation.get('summary', 'No explanation available.')}",
                 ]
             )
-            explanation = explanation_by_stock.get(str(signal.get("stock_id")), {})
-            lines.append(f"   Summary: {explanation.get('summary', 'No explanation available.')}")
             if explanation.get("strengths"):
                 lines.append("   Strengths: " + "; ".join(explanation["strengths"]))
             if explanation.get("risks"):
                 lines.append("   Risks: " + "; ".join(explanation["risks"]))
     else:
         lines.append("NO NEW BUY TODAY.")
-        if not configured:
-            lines.append("Reason: portfolio state is not configured; configure data/portfolio_state.json before enabling BUY decisions.")
-        elif market_regime.upper() == "BEAR":
+        if market_regime.upper() == "BEAR":
             lines.append("Reason: new entries are blocked in BEAR regime by default.")
         elif not candidates:
             lines.append("Reason: no stock met the V1.5 candidate rules.")
         else:
             reasons = [str(item.get("portfolio_reason")) for item in candidates if item.get("portfolio_reason")]
             if reasons:
-                most_common = max(set(reasons), key=reasons.count)
-                lines.append(f"Reason: portfolio constraints ({most_common}).")
+                lines.append(f"Reason: {max(set(reasons), key=reasons.count)}.")
 
-    lines.extend(["", f"Trade candidates today: {len(candidates)} (candidate set capped at Top 10)"])
-
+    lines.extend(["", f"Trade candidates shown: {len(candidates)} (Top 10 display cap)"])
     watchlist = [item for item in candidates if not item.get("selected")][:5]
     if watchlist:
-        lines.append("",)
+        lines.append("")
         lines.append("Watchlist")
         for item in watchlist:
             lines.append(
@@ -111,7 +93,7 @@ def send_email(
     recipient: str | None = None,
     subject: str = "Daily Stock Agent Report",
 ) -> None:
-    """Send the rendered report using SMTP credentials from arguments or environment."""
+    """Send a plain-text email using explicit arguments or environment variables."""
     host = smtp_host or os.environ["SMTP_HOST"]
     port = smtp_port or int(os.getenv("SMTP_PORT", "587"))
     user = smtp_user or os.environ["SMTP_USER"]
@@ -129,3 +111,20 @@ def send_email(
         server.starttls()
         server.login(user, password)
         server.send_message(message)
+
+
+def _send_failure_email(error_text: str) -> None:
+    body = (
+        "Daily Stock Agent ALERT\n\n"
+        "The scheduled pipeline failed before a normal daily report could be delivered.\n\n"
+        f"Reason: {error_text}\n"
+    )
+    send_email(body, subject="Daily Stock Agent ALERT - Pipeline Failed")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Send a Daily Stock Agent failure alert")
+    parser.add_argument("--failure", help="Failure reason to include in the alert")
+    args = parser.parse_args()
+    if args.failure:
+        _send_failure_email(args.failure)
