@@ -6,6 +6,9 @@ V1.5 remains the deterministic stock-selection layer. V1.6 adds only the
 portfolio rules currently chosen for live use: minimum score, BEAR-market entry
 block, and HOLD for stocks already in the user's portfolio. Total capital is
 optional metadata and does not control BUY sizing or cash availability.
+
+The ``selected`` flag means the stock is eligible to enter the AI Top-3 ranking
+step. It is not itself the final email recommendation.
 """
 
 import argparse
@@ -194,7 +197,7 @@ def run(
     print(f"Universe scanned: {len(stock_data)}")
     print(f"V1.5 trade candidates: {len(candidates)}")
     print(f"Top {MAX_CANDIDATES} candidates shown: {len(top_candidates)}")
-    print(f"Selected BUYs after V1.6 gates: {len(selected)}")
+    print(f"Eligible for AI ranking after V1.6 gates: {len(selected)}")
     if not selected.empty:
         print(
             selected[
@@ -202,7 +205,7 @@ def run(
             ].to_string(index=False)
         )
     else:
-        print("No new BUY selected today.")
+        print("No stocks eligible for AI Top-3 ranking today.")
     print(f"Saved: {output}")
     return signals
 
