@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-"""Render and send the daily V1.5 report by SMTP.
+"""Render and send the V1.6 portfolio-aware daily report by SMTP.
 
-This module is notification-only. It does not create or modify trading signals.
+Notification-only: this module never places or modifies trading orders.
 """
 
+import argparse
 import os
 import smtplib
 from email.message import EmailMessage
@@ -13,44 +14,68 @@ from typing import Any
 
 def render_report(
     signals: list[dict[str, Any]],
-    explanations: list[dict[str, Any]],
+    recommendations: list[dict[str, Any]],
     *,
     market_regime: str,
     signal_date: str,
 ) -> str:
-    """Render a deterministic plain-text report from signal facts and explanations."""
-    explanation_by_stock = {str(item.get("stock_id")): item for item in explanations}
+    """Render the quantitative candidate summary and AI-selected Top 3."""
+    candidates = [item for item in signals if item.get("candidate")]
+    eligible = [item for item in signals if item.get("selected")]
+    signal_by_stock = {str(item.get("stock_id")): item for item in signals}
+    snapshot = signals[0] if signals else {}
+    total_capital = snapshot.get("total_capital", 0)
+    position_count = snapshot.get("position_count", 0)
+
     lines = [
-        "Daily Stock Agent",
+        "Daily Stock Agent V1.6.1",
         f"Date: {signal_date}",
         f"Market regime: {market_regime}",
         "",
-        "Selected signals",
+        "Portfolio context",
+        f"  Total capital: ${float(total_capital):,.0f}" if total_capital else "  Total capital: not configured",
+        f"  Known holdings: {position_count}",
+        "  Cash availability / position sizing: not used",
+        "",
+        "AI TOP 3 RECOMMENDATIONS",
     ]
 
-    selected = [item for item in signals if item.get("selected")]
-    if not selected:
-        lines.append("No selected signals today.")
-    else:
-        for index, signal in enumerate(selected, start=1):
-            stock_id = str(signal.get("stock_id"))
-            explanation = explanation_by_stock.get(stock_id, {})
+    if recommendations:
+        for rec in recommendations:
+            stock_id = str(rec.get("stock_id"))
+            signal = signal_by_stock.get(stock_id, {})
             lines.extend(
                 [
                     "",
-                    f"{index}. {stock_id} | action={signal.get('action')} | score={signal.get('score')} | RS20={signal.get('rs20')}",
-                    f"   Pullback: {signal.get('drawdown_20d')}",
-                    f"   Summary: {explanation.get('summary', 'No explanation available.')}",
+                    f"{rec.get('rank')}. {stock_id} | {signal.get('action')} | score={signal.get('score')}",
+                    f"   RS20: {signal.get('rs20')} | RS60: {signal.get('rs60')} | Pullback: {signal.get('drawdown_20d')}",
+                    f"   Why selected: {rec.get('reason')}",
                 ]
             )
-            strengths = explanation.get("strengths", [])
-            risks = explanation.get("risks", [])
-            if strengths:
-                lines.append("   Strengths: " + "; ".join(strengths))
-            if risks:
-                lines.append("   Risks: " + "; ".join(risks))
+            if rec.get("strengths"):
+                lines.append("   Strengths: " + "; ".join(str(x) for x in rec["strengths"]))
+            if rec.get("risks"):
+                lines.append("   Key risk: " + "; ".join(str(x) for x in rec["risks"]))
+    else:
+        lines.append("NO TOP-3 RECOMMENDATION TODAY.")
+        if market_regime.upper() == "BEAR":
+            lines.append("Reason: new entries are blocked in BEAR regime by default.")
+        elif not candidates:
+            lines.append("Reason: no stock met the V1.5 candidate rules.")
+        elif not eligible:
+            lines.append("Reason: no candidate passed the V1.6 entry gates.")
 
-    lines.extend(["", "Strategy decision is deterministic; LLM output is explanation-only."])
+    lines.extend(
+        [
+            "",
+            "Quantitative candidate summary",
+            f"  V1.5 candidates: {len(candidates)}",
+            f"  V1.6 eligible for AI ranking: {len(eligible)}",
+            f"  AI recommendations: {len(recommendations)}",
+            "",
+            "The quantitative engine determines eligibility. AI only prioritizes the eligible pool into Top 3 and explains the selection.",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -65,7 +90,7 @@ def send_email(
     recipient: str | None = None,
     subject: str = "Daily Stock Agent Report",
 ) -> None:
-    """Send the rendered report using SMTP credentials from arguments or environment."""
+    """Send a plain-text email using explicit arguments or environment variables."""
     host = smtp_host or os.environ["SMTP_HOST"]
     port = smtp_port or int(os.getenv("SMTP_PORT", "587"))
     user = smtp_user or os.environ["SMTP_USER"]
@@ -83,3 +108,20 @@ def send_email(
         server.starttls()
         server.login(user, password)
         server.send_message(message)
+
+
+def _send_failure_email(error_text: str) -> None:
+    body = (
+        "Daily Stock Agent ALERT\n\n"
+        "The scheduled pipeline failed before a normal daily report could be delivered.\n\n"
+        f"Reason: {error_text}\n"
+    )
+    send_email(body, subject="Daily Stock Agent ALERT - Pipeline Failed")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Send a Daily Stock Agent failure alert")
+    parser.add_argument("--failure", help="Failure reason to include in the alert")
+    args = parser.parse_args()
+    if args.failure:
+        _send_failure_email(args.failure)

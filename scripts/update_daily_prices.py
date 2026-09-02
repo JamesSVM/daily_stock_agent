@@ -23,7 +23,6 @@ DEFAULT_RETRY_WAIT_SECONDS = 10
 DEFAULT_MIN_COVERAGE = 0.90
 QUARANTINE_AFTER_FAILURES = 3
 QUARANTINE_RETRY_DAYS = 7
-BENCHMARK_SYMBOL = "^TWII"
 
 
 def _normalize_stock_id(stock_id: object) -> str:
@@ -143,13 +142,15 @@ def _upsert_stock_history(conn: sqlite3.Connection, stock_id: str, df: pd.DataFr
     data = df.copy()
     data["Date"] = pd.to_datetime(data["Date"], errors="coerce")
     data = data.dropna(subset=["Date"])
-    data = data.rename(columns={
-        "Open": "open",
-        "High": "high",
-        "Low": "low",
-        "Close": "close",
-        "Volume": "volume",
-    })
+    data = data.rename(
+        columns={
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Close": "close",
+            "Volume": "volume",
+        }
+    )
 
     required = ["open", "high", "low", "close", "volume"]
     if any(column not in data.columns for column in required):
@@ -164,15 +165,17 @@ def _upsert_stock_history(conn: sqlite3.Connection, stock_id: str, df: pd.DataFr
     rows = []
     for _, row in data.iterrows():
         trade_date = pd.Timestamp(row["Date"]).date().isoformat()
-        rows.append((
-            stock_id,
-            trade_date,
-            float(row["open"]),
-            float(row["high"]),
-            float(row["low"]),
-            float(row["close"]),
-            int(row["volume"]),
-        ))
+        rows.append(
+            (
+                stock_id,
+                trade_date,
+                float(row["open"]),
+                float(row["high"]),
+                float(row["low"]),
+                float(row["close"]),
+                int(row["volume"]),
+            )
+        )
 
     conn.executemany(
         """
@@ -187,56 +190,31 @@ def _upsert_stock_history(conn: sqlite3.Connection, stock_id: str, df: pd.DataFr
     return len(rows)
 
 
-def _fetch_benchmark_date() -> date | None:
-    benchmark = get_price(BENCHMARK_SYMBOL, period="5d")
-    return _latest_date(benchmark)
-
-
-def _fallback_expected_date(conn: sqlite3.Connection, stock_ids: list[str]) -> date | None:
-    """Use the most common latest stock date when Yahoo benchmark is unavailable."""
+def _resolve_expected_date(conn: sqlite3.Connection, stock_ids: list[str]) -> date | None:
+    """Use the most common latest date across active stock data as the freshness anchor."""
     if not stock_ids:
         return None
     placeholders = ",".join("?" for _ in stock_ids)
-    rows = conn.execute(
+    row = conn.execute(
         f"""
-        SELECT date, COUNT(*) AS stock_count
-        FROM daily_price
-        WHERE stock_id IN ({placeholders})
-        GROUP BY date
-        ORDER BY stock_count DESC, date DESC
+        WITH latest_per_stock AS (
+            SELECT stock_id, MAX(date) AS latest_date
+            FROM daily_price
+            WHERE stock_id IN ({placeholders})
+            GROUP BY stock_id
+        )
+        SELECT latest_date, COUNT(*) AS stock_count
+        FROM latest_per_stock
+        WHERE latest_date IS NOT NULL
+        GROUP BY latest_date
+        ORDER BY stock_count DESC, latest_date DESC
         LIMIT 1
         """,
         stock_ids,
     ).fetchone()
-    if not rows or not rows[0]:
+    if not row or not row[0]:
         return None
-    return date.fromisoformat(str(rows[0]))
-
-
-def _resolve_expected_date(
-    conn: sqlite3.Connection,
-    stock_ids: list[str],
-    retry_attempts: int,
-    retry_wait_seconds: int,
-) -> tuple[date | None, bool]:
-    """Return expected market date and whether it came from the TAIEX benchmark."""
-    for attempt in range(1, retry_attempts + 1):
-        expected = _fetch_benchmark_date()
-        if expected is not None:
-            return expected, True
-        print(f"Benchmark retry {attempt}/{retry_attempts}: {BENCHMARK_SYMBOL} unavailable")
-        if attempt < retry_attempts:
-            time.sleep(retry_wait_seconds)
-
-    fallback = _fallback_expected_date(conn, stock_ids)
-    if fallback is not None:
-        print(
-            f"Benchmark warning: {BENCHMARK_SYMBOL} unavailable; "
-            f"using stock-data date {fallback} as freshness anchor."
-        )
-        return fallback, False
-
-    return None, False
+    return date.fromisoformat(str(row[0]))
 
 
 def _coverage(conn: sqlite3.Connection, stock_ids: list[str], expected_date: date) -> tuple[float, list[str]]:
@@ -279,7 +257,8 @@ def update_database(
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    with sqlite3.connect(path) as conn:
+    with sqlite3.connect(path, timeout=30) as conn:
+        conn.execute("PRAGMA busy_timeout = 30000")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS daily_price (
@@ -307,53 +286,41 @@ def update_database(
                     _record_success(conn, stock_id, _latest_date(df))
                 else:
                     consecutive = _record_failure(conn, stock_id, "Yahoo returned no usable price data")
-                    failures.append({
-                        "stock_id": stock_id,
-                        "reason": "no_usable_data",
-                        "consecutive_failures": consecutive,
-                    })
+                    failures.append(
+                        {
+                            "stock_id": stock_id,
+                            "reason": "no_usable_data",
+                            "consecutive_failures": consecutive,
+                        }
+                    )
             except Exception as exc:  # noqa: BLE001 - isolate one bad ticker from the batch
                 consecutive = _record_failure(conn, stock_id, repr(exc))
-                failures.append({
-                    "stock_id": stock_id,
-                    "reason": repr(exc),
-                    "consecutive_failures": consecutive,
-                })
+                failures.append(
+                    {
+                        "stock_id": stock_id,
+                        "reason": repr(exc),
+                        "consecutive_failures": consecutive,
+                    }
+                )
 
         conn.commit()
 
-        expected_date, benchmark_used = _resolve_expected_date(
-            conn,
-            stock_ids,
-            retry_attempts=retry_attempts,
-            retry_wait_seconds=retry_wait_seconds,
-        )
+        expected_date = _resolve_expected_date(conn, stock_ids)
         if expected_date is None:
-            raise RuntimeError(
-                "Unable to establish a market-data freshness date from Yahoo benchmark "
-                f"{BENCHMARK_SYMBOL} or existing stock data."
-            )
+            raise RuntimeError("Unable to establish a market-data freshness date from active stock data.")
 
         today = datetime.now(TAIPEI_TZ).date()
         if require_today and today.weekday() < 5 and expected_date != today:
             for attempt in range(1, retry_attempts + 1):
                 print(
                     f"Freshness retry {attempt}/{retry_attempts}: "
-                    f"Yahoo benchmark/date={expected_date}, expected={today}"
+                    f"stock-data date={expected_date}, expected={today}"
                 )
+                if expected_date == today:
+                    break
                 if attempt < retry_attempts:
                     time.sleep(retry_wait_seconds)
-                    refreshed, refreshed_from_benchmark = _resolve_expected_date(
-                        conn,
-                        stock_ids,
-                        retry_attempts=1,
-                        retry_wait_seconds=retry_wait_seconds,
-                    )
-                    if refreshed is not None:
-                        expected_date = refreshed
-                        benchmark_used = refreshed_from_benchmark
-                    if expected_date == today:
-                        break
+                    expected_date = _resolve_expected_date(conn, stock_ids) or expected_date
             if expected_date != today:
                 raise RuntimeError(
                     f"Market data is stale: latest date={expected_date}, expected={today}. No signal generated."
@@ -392,7 +359,7 @@ def update_database(
                 f"Stale/missing stocks={len(stale_ids)}. No signal generated."
             )
 
-    print(f"Market data date: {expected_date} ({'TAIEX benchmark' if benchmark_used else 'stock-data fallback'})")
+    print(f"Market data date: {expected_date} (stock-data freshness anchor)")
     print(f"Freshness coverage: {coverage:.1%}")
     print(f"Updated stocks: {stocks_updated}")
     print(f"Upserted rows: {rows_upserted}")
@@ -408,7 +375,11 @@ def main() -> None:
     parser.add_argument("--retry-attempts", type=int, default=DEFAULT_RETRY_ATTEMPTS)
     parser.add_argument("--retry-wait-seconds", type=int, default=DEFAULT_RETRY_WAIT_SECONDS)
     parser.add_argument("--min-coverage", type=float, default=DEFAULT_MIN_COVERAGE)
-    parser.add_argument("--allow-stale-date", action="store_true", help="Do not require Yahoo/stock-data date to equal today")
+    parser.add_argument(
+        "--allow-stale-date",
+        action="store_true",
+        help="Do not require stock-data date to equal today",
+    )
     args = parser.parse_args()
     update_database(
         args.db,

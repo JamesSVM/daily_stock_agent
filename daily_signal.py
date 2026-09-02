@@ -1,22 +1,29 @@
 from __future__ import annotations
 
-"""Generate the daily V1.5 live-trading signal sheet.
+"""Generate the daily V1.6 portfolio-aware live-trading signal sheet.
 
-This module intentionally does not place orders. It converts the frozen V1.5
-research rules into a repeatable daily candidate scan.
+V1.5 remains the deterministic stock-selection layer. V1.6 adds only the
+portfolio rules currently chosen for live use: minimum score, BEAR-market entry
+block, and HOLD for stocks already in the user's portfolio. Total capital is
+optional metadata and does not control BUY sizing or cash availability.
 
-Parity rules:
-- Market regime is used for portfolio-level exits, not as an entry gate.
-- Candidate ranking is RS20 descending, then score descending, then stock_id.
+The ``selected`` flag means the stock is eligible to enter the AI Top-3 ranking
+step. It is not itself the final email recommendation.
 """
 
 import argparse
 import sqlite3
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
 from engine.market_regime import build_market_proxy
+from engine.portfolio_engine import (
+    DEFAULT_STATE_PATH,
+    apply_portfolio_decisions,
+    load_portfolio_state,
+)
 from features.relative_strength import (
     add_relative_strength_features,
     build_relative_strength_signal,
@@ -24,17 +31,17 @@ from features.relative_strength import (
 
 DB_PATH = "data/database.db"
 DEFAULT_OUTPUT = "reports/daily_signal.csv"
+DEFAULT_PORTFOLIO_STATE = str(DEFAULT_STATE_PATH)
 
-MAX_POSITIONS = 3
 RS_THRESHOLD = 0.10
 PULLBACK_MIN = -0.07
 PULLBACK_MAX = -0.02
-REGIME_POLICY = "bull_to_neutral"
-MIN_SCORE = 70.0
+MIN_SIGNAL_SCORE = 70.0
+MAX_CANDIDATES = 10
 
 
 def load_stock_data(conn: sqlite3.Connection) -> dict[str, pd.DataFrame]:
-    """Load only active stocks from stock_universe and exclude quarantined tickers."""
+    """Load only active, non-quarantined stocks from the local database."""
     query = """
         SELECT p.stock_id, p.date, p.open, p.high, p.low, p.close, p.volume
         FROM daily_price p
@@ -70,7 +77,6 @@ def load_stock_data(conn: sqlite3.Connection) -> dict[str, pd.DataFrame]:
             }
         )
         result[stock_id] = data
-
     return result
 
 
@@ -82,40 +88,22 @@ def is_v15_candidate(
     trend_pass: bool,
     momentum_pass: bool,
 ) -> bool:
-    """Apply the frozen V1.5 entry candidate definition."""
+    """Apply the frozen V1.5 technical candidate definition."""
     return (
         rs20 > RS_THRESHOLD
         and PULLBACK_MIN <= drawdown_20d <= PULLBACK_MAX
-        and score >= MIN_SCORE
+        and score >= MIN_SIGNAL_SCORE
         and trend_pass
         and momentum_pass
     )
 
 
-def rank_and_select_signals(signals: pd.DataFrame) -> pd.DataFrame:
-    """Apply the frozen V1.5 ranking and position cap to a signal table."""
-    if signals.empty:
-        result = signals.copy()
-        result["selected"] = pd.Series(dtype=bool)
-        result["action"] = pd.Series(dtype=str)
-        return result
-
-    result = signals.sort_values(
-        ["candidate", "rs20", "score", "stock_id"],
-        ascending=[False, False, False, True],
-    ).reset_index(drop=True)
-
-    candidate_idx = result.index[result["candidate"]].tolist()
-    selected_idx = set(candidate_idx[:MAX_POSITIONS])
-    result["selected"] = result.index.isin(selected_idx)
-    result["action"] = result["selected"].map(
-        {True: "BUY_NEXT_OPEN", False: "WATCH"}
-    )
-    return result
-
-
-def build_signal_sheet(stock_data: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, str]:
-    """Calculate V1.5 signals for the latest common market date."""
+def build_signal_sheet(
+    stock_data: dict[str, pd.DataFrame],
+    *,
+    portfolio_state_path: str | Path = DEFAULT_PORTFOLIO_STATE,
+) -> tuple[pd.DataFrame, str]:
+    """Calculate V1.5 signals and apply the simplified V1.6 portfolio gates."""
     if not stock_data:
         raise ValueError("No active stock data found in daily_price.")
 
@@ -124,6 +112,7 @@ def build_signal_sheet(stock_data: dict[str, pd.DataFrame]) -> tuple[pd.DataFram
         raise ValueError("Unable to build market proxy from daily_price.")
 
     latest_date = market.index.max()
+    signal_date: date = latest_date.date()
     latest_regime = str(market.loc[latest_date, "regime"])
 
     rows: list[dict] = []
@@ -137,13 +126,11 @@ def build_signal_sheet(stock_data: dict[str, pd.DataFrame]) -> tuple[pd.DataFram
 
         row = data.loc[latest_date]
         signal = build_relative_strength_signal(row)
-
         rs20 = float(row.get("rs20", 0.0))
         drawdown = float(row.get("drawdown_20d", 0.0))
         score = float(signal["score"])
         trend_pass = bool(signal["trend_pass"])
         momentum_pass = bool(signal["momentum_pass"])
-
         candidate = is_v15_candidate(
             rs20=rs20,
             drawdown_20d=drawdown,
@@ -151,10 +138,9 @@ def build_signal_sheet(stock_data: dict[str, pd.DataFrame]) -> tuple[pd.DataFram
             trend_pass=trend_pass,
             momentum_pass=momentum_pass,
         )
-
         rows.append(
             {
-                "date": latest_date.date().isoformat(),
+                "date": signal_date.isoformat(),
                 "stock_id": stock_id,
                 "market_regime": latest_regime,
                 "close": float(row["Close"]),
@@ -174,37 +160,71 @@ def build_signal_sheet(stock_data: dict[str, pd.DataFrame]) -> tuple[pd.DataFram
     if signals.empty:
         return signals, latest_regime
 
-    return rank_and_select_signals(signals), latest_regime
+    state = load_portfolio_state(portfolio_state_path)
+    signals = apply_portfolio_decisions(
+        signals,
+        state,
+        signal_date=signal_date,
+        max_candidates=MAX_CANDIDATES,
+    )
+    return signals, latest_regime
 
 
-def run(db_path: str = DB_PATH, output_path: str = DEFAULT_OUTPUT) -> pd.DataFrame:
+def run(
+    db_path: str = DB_PATH,
+    output_path: str = DEFAULT_OUTPUT,
+    portfolio_state_path: str = DEFAULT_PORTFOLIO_STATE,
+) -> pd.DataFrame:
     with sqlite3.connect(db_path) as conn:
         stock_data = load_stock_data(conn)
 
-    signals, regime = build_signal_sheet(stock_data)
+    signals, regime = build_signal_sheet(
+        stock_data,
+        portfolio_state_path=portfolio_state_path,
+    )
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     signals.to_csv(output, index=False)
 
     selected = signals[signals["selected"]] if not signals.empty else signals
-    print(f"Signal date: {signals['date'].iloc[0] if not signals.empty else 'N/A'}")
+    candidates = signals[signals["candidate"]] if not signals.empty else signals
+    top_candidates = signals[signals["top_candidate"]] if not signals.empty else signals
+    signal_date = signals["date"].iloc[0] if not signals.empty else "N/A"
+
+    print(f"Signal date: {signal_date}")
     print(f"Market regime: {regime}")
     print(f"Universe scanned: {len(stock_data)}")
-    print(f"Selected: {len(selected)} / {MAX_POSITIONS}")
+    print(f"V1.5 trade candidates: {len(candidates)}")
+    print(f"Top {MAX_CANDIDATES} candidates shown: {len(top_candidates)}")
+    print(f"Eligible for AI ranking after V1.6 gates: {len(selected)}")
     if not selected.empty:
-        print(selected[["stock_id", "score", "rs20", "drawdown_20d", "action"]].to_string(index=False))
+        print(
+            selected[
+                ["stock_id", "score", "rs20", "drawdown_20d", "action", "portfolio_reason"]
+            ].to_string(index=False)
+        )
+    else:
+        print("No stocks eligible for AI Top-3 ranking today.")
     print(f"Saved: {output}")
-
     return signals
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate V1.5 daily live signals")
+    parser = argparse.ArgumentParser(description="Generate V1.6 daily portfolio-aware signals")
     parser.add_argument("--db", default=DB_PATH, help="SQLite database path")
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="Signal CSV output path")
+    parser.add_argument(
+        "--portfolio-state",
+        default=DEFAULT_PORTFOLIO_STATE,
+        help="JSON file containing optional total capital and current holdings",
+    )
     args = parser.parse_args()
-    run(db_path=args.db, output_path=args.output)
+    run(
+        db_path=args.db,
+        output_path=args.output,
+        portfolio_state_path=args.portfolio_state,
+    )
 
 
 if __name__ == "__main__":

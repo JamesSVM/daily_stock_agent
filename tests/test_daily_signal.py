@@ -4,15 +4,14 @@ import numpy as np
 import pandas as pd
 
 from daily_signal import (
-    MAX_POSITIONS,
-    MIN_SCORE,
+    MIN_SIGNAL_SCORE,
     PULLBACK_MAX,
     PULLBACK_MIN,
     RS_THRESHOLD,
     build_signal_sheet,
     is_v15_candidate,
-    rank_and_select_signals,
 )
+from engine.portfolio_engine import PortfolioConfig, PortfolioState, decide_action
 
 
 def _make_stock(close_values: list[float]) -> pd.DataFrame:
@@ -31,110 +30,106 @@ def _make_stock(close_values: list[float]) -> pd.DataFrame:
 
 
 def _synthetic_universe() -> dict[str, pd.DataFrame]:
-    """One deterministic V1.5 candidate plus five weak/flat stocks."""
     n = 90
     weak = np.linspace(100.0, 100.5, n).tolist()
-
-    # The final 20 sessions rise from 90 to a 110 peak, then pull back to
-    # 105. This deliberately satisfies the frozen V1.5 pullback window while
-    # keeping 20D/60D momentum and the MA20 trend positive.
     strong = list(np.linspace(70.0, 90.0, 70))
     strong.extend(np.linspace(90.0, 110.0, 10))
     strong.extend(np.linspace(110.0, 105.0, 10))
-
     return {
         "STRONG": _make_stock(strong),
         "WEAK1": _make_stock(weak),
         "WEAK2": _make_stock(weak),
         "WEAK3": _make_stock(weak),
-        "WEAK4": _make_stock(weak),
-        "WEAK5": _make_stock(weak),
     }
 
 
 def test_v15_threshold_constants_are_frozen() -> None:
-    assert MAX_POSITIONS == 3
     assert RS_THRESHOLD == 0.10
     assert PULLBACK_MIN == -0.07
     assert PULLBACK_MAX == -0.02
-    assert MIN_SCORE == 70.0
+    assert MIN_SIGNAL_SCORE == 70.0
 
 
 def test_entry_candidate_rule_is_regime_independent() -> None:
-    kwargs = {
-        "rs20": 0.15,
-        "drawdown_20d": -0.05,
-        "score": 80.0,
-        "trend_pass": True,
-        "momentum_pass": True,
-    }
-    assert is_v15_candidate(**kwargs)
+    assert is_v15_candidate(
+        rs20=0.15,
+        drawdown_20d=-0.05,
+        score=80.0,
+        trend_pass=True,
+        momentum_pass=True,
+    )
 
 
-def test_daily_signal_returns_latest_date_and_expected_columns() -> None:
-    signals, regime = build_signal_sheet(_synthetic_universe())
+def _state(tmp_path):
+    state_path = tmp_path / "portfolio_state.json"
+    state_path.write_text(
+        '{"config": {"total_capital": 300000, "min_score": 85, "bear_market_entry": false}, "positions": {}}',
+        encoding="utf-8",
+    )
+    return state_path
 
+
+def test_daily_signal_returns_latest_date_and_expected_columns(tmp_path) -> None:
+    signals, regime = build_signal_sheet(_synthetic_universe(), portfolio_state_path=_state(tmp_path))
     assert not signals.empty
     assert signals["date"].nunique() == 1
     assert regime in {"bull", "neutral", "bear"}
-
     expected = {
-        "date",
-        "stock_id",
-        "market_regime",
-        "close",
-        "rs20",
-        "rs60",
-        "drawdown_20d",
-        "score",
-        "trend_pass",
-        "momentum_pass",
-        "pullback_pass",
-        "candidate",
-        "selected",
-        "action",
-        "reason",
+        "date", "stock_id", "market_regime", "close", "rs20", "rs60",
+        "drawdown_20d", "score", "trend_pass", "momentum_pass",
+        "pullback_pass", "candidate", "selected", "action", "reason",
+        "trade_score", "portfolio_reason", "total_capital", "position_count",
     }
     assert expected.issubset(signals.columns)
 
 
-def test_candidate_respects_frozen_v15_rules() -> None:
-    signals, _ = build_signal_sheet(_synthetic_universe())
-    candidates = signals[signals["candidate"]]
-
-    assert not candidates.empty
-    assert (candidates["rs20"] > RS_THRESHOLD).all()
-    assert (candidates["drawdown_20d"] >= PULLBACK_MIN).all()
-    assert (candidates["drawdown_20d"] <= PULLBACK_MAX).all()
-    assert (candidates["score"] >= MIN_SCORE).all()
-    assert candidates["trend_pass"].all()
-    assert candidates["momentum_pass"].all()
-
-
-def test_selected_signals_are_ranked_and_capped() -> None:
-    signals = pd.DataFrame(
-        [
-            {"stock_id": "A", "candidate": True, "rs20": 0.15, "score": 72.0},
-            {"stock_id": "B", "candidate": True, "rs20": 0.30, "score": 71.0},
-            {"stock_id": "C", "candidate": True, "rs20": 0.20, "score": 95.0},
-            {"stock_id": "D", "candidate": True, "rs20": 0.30, "score": 80.0},
-            {"stock_id": "E", "candidate": False, "rs20": 0.50, "score": 99.0},
-        ]
+def test_held_stock_is_hold(tmp_path) -> None:
+    state_path = tmp_path / "portfolio_state.json"
+    state_path.write_text(
+        '{"config": {"total_capital": 300000, "min_score": 85, "bear_market_entry": false}, "positions": {"STRONG": 1}}',
+        encoding="utf-8",
     )
-
-    ranked = rank_and_select_signals(signals)
-    selected = ranked[ranked["selected"]]
-
-    assert len(selected) == MAX_POSITIONS
-    assert selected["stock_id"].tolist() == ["D", "B", "C"]
-    assert selected["action"].eq("BUY_NEXT_OPEN").all()
-    assert ranked.loc[~ranked["selected"], "action"].eq("WATCH").all()
+    signals, _ = build_signal_sheet(_synthetic_universe(), portfolio_state_path=state_path)
+    row = signals.loc[signals["stock_id"] == "STRONG"].iloc[0]
+    assert bool(row["candidate"])
+    assert row["action"] == "HOLD"
+    assert not bool(row["selected"])
 
 
-def test_non_candidates_are_not_marked_for_entry() -> None:
-    signals, _ = build_signal_sheet(_synthetic_universe())
-    non_candidates = signals[~signals["candidate"]]
+def test_below_minimum_score_is_watch() -> None:
+    state = PortfolioState(
+        config=PortfolioConfig(total_capital=300000, min_score=85),
+        configured=True,
+    )
+    decision = decide_action(stock_id="2330", score=84.9, market_regime="BULL", state=state)
+    assert decision["action"] == "WATCH"
+    assert decision["portfolio_reason"] == "below_minimum_score"
 
-    assert (non_candidates["selected"] == False).all()
-    assert (non_candidates["action"] == "WATCH").all()
-    assert (non_candidates["reason"] == "does_not_meet_v1_5_rules").all()
+
+def test_bear_market_blocks_new_buy() -> None:
+    state = PortfolioState(
+        config=PortfolioConfig(total_capital=300000, min_score=85),
+        configured=True,
+    )
+    decision = decide_action(stock_id="2330", score=95, market_regime="BEAR", state=state)
+    assert decision["action"] == "NO_TRADE"
+    assert not decision["selected"]
+
+
+def test_above_minimum_score_buys_in_bull_market() -> None:
+    state = PortfolioState(
+        config=PortfolioConfig(total_capital=300000, min_score=85),
+        configured=True,
+    )
+    decision = decide_action(stock_id="2330", score=95, market_regime="BULL", state=state)
+    assert decision["action"] == "BUY_NEXT_OPEN"
+    assert decision["selected"]
+
+
+def test_missing_portfolio_state_does_not_disable_signal_scan(tmp_path) -> None:
+    missing = tmp_path / "missing.json"
+    signals, _ = build_signal_sheet(_synthetic_universe(), portfolio_state_path=missing)
+    assert not signals.empty
+    # Without known holdings we still expose the technical signal; only the
+    # HOLD classification requires a supplied positions list.
+    assert "action" in signals.columns

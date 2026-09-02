@@ -5,11 +5,11 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-
-import pandas as pd
 
 from engine.market_regime import build_market_proxy
 from engine.performance_tracker import (
@@ -91,22 +91,6 @@ def _build_daily_rankings(stock_data: dict[str, pd.DataFrame]) -> list[pd.DataFr
     return [rank_daily_signals(pd.DataFrame(by_date[d]), top_n=10) for d in sorted(by_date)]
 
 
-def _load_taiwan_benchmark(period: str = "3mo") -> pd.DataFrame:
-    try:
-        from crawler.price import get_price
-        benchmark = get_price("^TWII", period=period)
-        if benchmark is None or benchmark.empty:
-            return pd.DataFrame()
-        data = benchmark.copy()
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
-        data = data.rename(columns={"Date": "date", "Open": "open", "Close": "close"})
-        return data[["date", "open", "close"]]
-    except Exception as exc:  # benchmark is supplemental
-        print(f"Benchmark warning: TAIEX unavailable ({exc})")
-        return pd.DataFrame()
-
-
 def _price_frames_for_tracker(stock_data: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     frames: dict[str, pd.DataFrame] = {}
     for stock_id, data in stock_data.items():
@@ -119,15 +103,16 @@ def _price_frames_for_tracker(stock_data: dict[str, pd.DataFrame]) -> dict[str, 
     return frames
 
 
-def run(db_path: str, benchmark_period: str = "3mo") -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    with sqlite3.connect(db_path) as conn:
+def run(db_path: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Build performance tracking from stock data only; no external benchmark is fetched."""
+    with sqlite3.connect(db_path, timeout=30) as conn:
+        conn.execute("PRAGMA busy_timeout = 30000")
         stock_data = _load_universe_stock_data(conn)
     if not stock_data:
         raise RuntimeError("No active stock data found. Refresh the 300-stock universe first.")
 
     rankings = _build_daily_rankings(stock_data)
-    benchmark = _load_taiwan_benchmark(benchmark_period)
-    events = build_signal_events(rankings, _price_frames_for_tracker(stock_data), benchmark=benchmark)
+    events = build_signal_events(rankings, _price_frames_for_tracker(stock_data))
     summary = summarize_bucket_performance(events)
     persistence = summarize_persistence(events)
 
@@ -148,9 +133,8 @@ def run(db_path: str, benchmark_period: str = "3mo") -> tuple[pd.DataFrame, pd.D
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build V1.6 signal performance reports")
     parser.add_argument("--db", default=str(DEFAULT_DB))
-    parser.add_argument("--benchmark-period", default="3mo")
     args = parser.parse_args()
-    run(args.db, benchmark_period=args.benchmark_period)
+    run(args.db)
 
 
 if __name__ == "__main__":
