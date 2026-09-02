@@ -50,8 +50,6 @@ def _run_performance_tracking(env: dict[str, str]) -> None:
                 "scripts/build_performance_tracking.py",
                 "--db",
                 str(DB_PATH),
-                "--benchmark-period",
-                "3mo",
             ],
             env,
         )
