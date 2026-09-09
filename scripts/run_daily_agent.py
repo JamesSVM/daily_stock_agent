@@ -102,6 +102,8 @@ def main() -> None:
                 "10",
                 "--min-coverage",
                 "0.90",
+                "--degraded-min-coverage",
+                "0.75",
             ],
             env,
         )
