@@ -1,0 +1,8 @@
+{
+  "config": {
+    "total_capital": 0,
+    "min_score": 85,
+    "bear_market_entry": false
+  },
+  "positions": {}
+}

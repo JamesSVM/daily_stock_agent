@@ -21,9 +21,9 @@ TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 DEFAULT_RETRY_ATTEMPTS = 3
 DEFAULT_RETRY_WAIT_SECONDS = 10
 DEFAULT_MIN_COVERAGE = 0.90
+DEFAULT_DEGRADED_MIN_COVERAGE = 0.75
 QUARANTINE_AFTER_FAILURES = 3
 QUARANTINE_RETRY_DAYS = 7
-BENCHMARK_SYMBOL = "^TWII"
 
 
 def _normalize_stock_id(stock_id: object) -> str:
@@ -136,20 +136,31 @@ def _record_failure(conn: sqlite3.Connection, stock_id: str, error: str) -> int:
     return int(failures)
 
 
-def _upsert_stock_history(conn: sqlite3.Connection, stock_id: str, df: pd.DataFrame) -> int:
+def _safe_record_failure(conn: sqlite3.Connection, stock_id: str, error: Exception | str) -> int:
+    """Record a ticker failure without turning a secondary DB issue into the root failure."""
+    try:
+        return _record_failure(conn, stock_id, repr(error))
+    except sqlite3.Error as db_error:
+        print(f"Price status warning for {stock_id}: {db_error}")
+        return 0
+
+
+def _upsert_stock_history(conn: sqlite3.Connection, stock_id: str, df: pd.DataFrame | None) -> int:
     if df is None or df.empty or "Date" not in df.columns:
         return 0
 
     data = df.copy()
     data["Date"] = pd.to_datetime(data["Date"], errors="coerce")
     data = data.dropna(subset=["Date"])
-    data = data.rename(columns={
-        "Open": "open",
-        "High": "high",
-        "Low": "low",
-        "Close": "close",
-        "Volume": "volume",
-    })
+    data = data.rename(
+        columns={
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Close": "close",
+            "Volume": "volume",
+        }
+    )
 
     required = ["open", "high", "low", "close", "volume"]
     if any(column not in data.columns for column in required):
@@ -163,16 +174,17 @@ def _upsert_stock_history(conn: sqlite3.Connection, stock_id: str, df: pd.DataFr
 
     rows = []
     for _, row in data.iterrows():
-        trade_date = pd.Timestamp(row["Date"]).date().isoformat()
-        rows.append((
-            stock_id,
-            trade_date,
-            float(row["open"]),
-            float(row["high"]),
-            float(row["low"]),
-            float(row["close"]),
-            int(row["volume"]),
-        ))
+        rows.append(
+            (
+                stock_id,
+                pd.Timestamp(row["Date"]).date().isoformat(),
+                float(row["open"]),
+                float(row["high"]),
+                float(row["low"]),
+                float(row["close"]),
+                int(row["volume"]),
+            )
+        )
 
     conn.executemany(
         """
@@ -187,56 +199,31 @@ def _upsert_stock_history(conn: sqlite3.Connection, stock_id: str, df: pd.DataFr
     return len(rows)
 
 
-def _fetch_benchmark_date() -> date | None:
-    benchmark = get_price(BENCHMARK_SYMBOL, period="5d")
-    return _latest_date(benchmark)
-
-
-def _fallback_expected_date(conn: sqlite3.Connection, stock_ids: list[str]) -> date | None:
-    """Use the most common latest stock date when Yahoo benchmark is unavailable."""
+def _resolve_expected_date(conn: sqlite3.Connection, stock_ids: list[str]) -> date | None:
+    """Use the most common latest date across active stock data as the freshness anchor."""
     if not stock_ids:
         return None
     placeholders = ",".join("?" for _ in stock_ids)
-    rows = conn.execute(
+    row = conn.execute(
         f"""
-        SELECT date, COUNT(*) AS stock_count
-        FROM daily_price
-        WHERE stock_id IN ({placeholders})
-        GROUP BY date
-        ORDER BY stock_count DESC, date DESC
+        WITH latest_per_stock AS (
+            SELECT stock_id, MAX(date) AS latest_date
+            FROM daily_price
+            WHERE stock_id IN ({placeholders})
+            GROUP BY stock_id
+        )
+        SELECT latest_date, COUNT(*) AS stock_count
+        FROM latest_per_stock
+        WHERE latest_date IS NOT NULL
+        GROUP BY latest_date
+        ORDER BY stock_count DESC, latest_date DESC
         LIMIT 1
         """,
         stock_ids,
     ).fetchone()
-    if not rows or not rows[0]:
+    if not row or not row[0]:
         return None
-    return date.fromisoformat(str(rows[0]))
-
-
-def _resolve_expected_date(
-    conn: sqlite3.Connection,
-    stock_ids: list[str],
-    retry_attempts: int,
-    retry_wait_seconds: int,
-) -> tuple[date | None, bool]:
-    """Return expected market date and whether it came from the TAIEX benchmark."""
-    for attempt in range(1, retry_attempts + 1):
-        expected = _fetch_benchmark_date()
-        if expected is not None:
-            return expected, True
-        print(f"Benchmark retry {attempt}/{retry_attempts}: {BENCHMARK_SYMBOL} unavailable")
-        if attempt < retry_attempts:
-            time.sleep(retry_wait_seconds)
-
-    fallback = _fallback_expected_date(conn, stock_ids)
-    if fallback is not None:
-        print(
-            f"Benchmark warning: {BENCHMARK_SYMBOL} unavailable; "
-            f"using stock-data date {fallback} as freshness anchor."
-        )
-        return fallback, False
-
-    return None, False
+    return date.fromisoformat(str(row[0]))
 
 
 def _coverage(conn: sqlite3.Connection, stock_ids: list[str], expected_date: date) -> tuple[float, list[str]]:
@@ -259,6 +246,43 @@ def _coverage(conn: sqlite3.Connection, stock_ids: list[str], expected_date: dat
     return coverage, stale
 
 
+def _refresh_tickers(
+    conn: sqlite3.Connection,
+    stock_ids: list[str],
+    period: str,
+    failures: list[dict[str, object]],
+) -> tuple[int, int]:
+    stocks_updated = 0
+    rows_upserted = 0
+    for stock_id in stock_ids:
+        try:
+            df = get_price(stock_id, period=period)
+            count = _upsert_stock_history(conn, stock_id, df)
+            if count:
+                stocks_updated += 1
+                rows_upserted += count
+                _record_success(conn, stock_id, _latest_date(df))
+            else:
+                consecutive = _safe_record_failure(conn, stock_id, "Yahoo returned no usable price data")
+                failures.append(
+                    {
+                        "stock_id": stock_id,
+                        "reason": "no_usable_data",
+                        "consecutive_failures": consecutive,
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001 - isolate one bad ticker from the batch
+            consecutive = _safe_record_failure(conn, stock_id, exc)
+            failures.append(
+                {
+                    "stock_id": stock_id,
+                    "reason": repr(exc),
+                    "consecutive_failures": consecutive,
+                }
+            )
+    return stocks_updated, rows_upserted
+
+
 def _write_failure_report(failures: list[dict[str, object]]) -> None:
     path = REPO_ROOT / "reports" / "price_update_failures.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -268,18 +292,41 @@ def _write_failure_report(failures: list[dict[str, object]]) -> None:
         writer.writerows(failures)
 
 
+def _write_quality_status(
+    expected_date: date,
+    coverage: float,
+    stale_ids: list[str],
+    degraded: bool,
+) -> None:
+    path = REPO_ROOT / "reports" / "market_data_status.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    status = "DEGRADED" if degraded else "OK"
+    text = (
+        f"Status: {status}\n"
+        f"Market data date: {expected_date.isoformat()}\n"
+        f"Freshness coverage: {coverage:.1%}\n"
+        f"Stale/missing stocks: {len(stale_ids)}\n"
+    )
+    path.write_text(text, encoding="utf-8")
+
+
 def update_database(
     db_path: str,
     period: str = "3mo",
     retry_attempts: int = DEFAULT_RETRY_ATTEMPTS,
     retry_wait_seconds: int = DEFAULT_RETRY_WAIT_SECONDS,
     min_coverage: float = DEFAULT_MIN_COVERAGE,
+    degraded_min_coverage: float = DEFAULT_DEGRADED_MIN_COVERAGE,
     require_today: bool = True,
 ) -> tuple[int, int]:
-    path = Path(db_path)
+    if not 0.0 < degraded_min_coverage <= min_coverage <= 1.0:
+        raise ValueError("Coverage thresholds must satisfy 0 < degraded_min_coverage <= min_coverage <= 1.")
+
+    path = Path(db_path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    with sqlite3.connect(path) as conn:
+    with sqlite3.connect(path, timeout=60) as conn:
+        conn.execute("PRAGMA busy_timeout = 60000")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS daily_price (
@@ -294,108 +341,81 @@ def update_database(
             raise RuntimeError("No active stock_ids found in the stock universe; cannot refresh prices automatically.")
 
         failures: list[dict[str, object]] = []
-        stocks_updated = 0
-        rows_upserted = 0
-
-        for stock_id in stock_ids:
-            try:
-                df = get_price(stock_id, period=period)
-                count = _upsert_stock_history(conn, stock_id, df)
-                if count:
-                    stocks_updated += 1
-                    rows_upserted += count
-                    _record_success(conn, stock_id, _latest_date(df))
-                else:
-                    consecutive = _record_failure(conn, stock_id, "Yahoo returned no usable price data")
-                    failures.append({
-                        "stock_id": stock_id,
-                        "reason": "no_usable_data",
-                        "consecutive_failures": consecutive,
-                    })
-            except Exception as exc:  # noqa: BLE001 - isolate one bad ticker from the batch
-                consecutive = _record_failure(conn, stock_id, repr(exc))
-                failures.append({
-                    "stock_id": stock_id,
-                    "reason": repr(exc),
-                    "consecutive_failures": consecutive,
-                })
-
+        stocks_updated, rows_upserted = _refresh_tickers(conn, stock_ids, period, failures)
         conn.commit()
 
-        expected_date, benchmark_used = _resolve_expected_date(
-            conn,
-            stock_ids,
-            retry_attempts=retry_attempts,
-            retry_wait_seconds=retry_wait_seconds,
-        )
-        if expected_date is None:
-            raise RuntimeError(
-                "Unable to establish a market-data freshness date from Yahoo benchmark "
-                f"{BENCHMARK_SYMBOL} or existing stock data."
-            )
-
         today = datetime.now(TAIPEI_TZ).date()
-        if require_today and today.weekday() < 5 and expected_date != today:
+        weekday_requires_today = require_today and today.weekday() < 5
+
+        expected_date = today if weekday_requires_today else _resolve_expected_date(conn, stock_ids)
+        if expected_date is None:
+            raise RuntimeError("Unable to establish a market-data freshness date from active stock data.")
+
+        # The old implementation re-read SQLite during freshness retry without
+        # fetching the stale tickers again. Retry the actual stale tickers instead.
+        if weekday_requires_today:
+            coverage, stale_ids = _coverage(conn, stock_ids, today)
             for attempt in range(1, retry_attempts + 1):
+                if coverage >= min_coverage:
+                    break
                 print(
-                    f"Freshness retry {attempt}/{retry_attempts}: "
-                    f"Yahoo benchmark/date={expected_date}, expected={today}"
+                    f"Stock freshness retry {attempt}/{retry_attempts}: "
+                    f"coverage={coverage:.1%}, target={min_coverage:.1%}, stale={len(stale_ids)}"
                 )
-                if attempt < retry_attempts:
-                    time.sleep(retry_wait_seconds)
-                    refreshed, refreshed_from_benchmark = _resolve_expected_date(
-                        conn,
-                        stock_ids,
-                        retry_attempts=1,
-                        retry_wait_seconds=retry_wait_seconds,
-                    )
-                    if refreshed is not None:
-                        expected_date = refreshed
-                        benchmark_used = refreshed_from_benchmark
-                    if expected_date == today:
-                        break
-            if expected_date != today:
-                raise RuntimeError(
-                    f"Market data is stale: latest date={expected_date}, expected={today}. No signal generated."
-                )
+                if coverage >= degraded_min_coverage and attempt == retry_attempts:
+                    break
+                if attempt == retry_attempts:
+                    break
+                time.sleep(retry_wait_seconds)
+                retry_stocks, retry_rows = _refresh_tickers(conn, stale_ids, period="5d", failures=failures)
+                stocks_updated += retry_stocks
+                rows_upserted += retry_rows
+                conn.commit()
+                coverage, stale_ids = _coverage(conn, stock_ids, today)
 
-        coverage, stale_ids = _coverage(conn, stock_ids, expected_date)
-        for attempt in range(1, retry_attempts + 1):
             if coverage >= min_coverage:
-                break
-            print(
-                f"Stock freshness retry {attempt}/{retry_attempts}: "
-                f"coverage={coverage:.1%}, target={min_coverage:.1%}, stale={len(stale_ids)}"
-            )
-            if attempt == retry_attempts:
-                break
-            time.sleep(retry_wait_seconds)
-            for stock_id in stale_ids:
-                try:
-                    df = get_price(stock_id, period="5d")
-                    count = _upsert_stock_history(conn, stock_id, df)
-                    if count:
-                        _record_success(conn, stock_id, _latest_date(df))
-                    else:
-                        _record_failure(conn, stock_id, "Retry returned no usable price data")
-                except Exception as exc:  # noqa: BLE001
-                    _record_failure(conn, stock_id, repr(exc))
-            conn.commit()
-            coverage, stale_ids = _coverage(conn, stock_ids, expected_date)
+                degraded = False
+            elif coverage >= degraded_min_coverage:
+                degraded = True
+                print(
+                    f"Market data warning: degraded freshness coverage {coverage:.1%}; "
+                    f"continuing with fresh subset and skipping {len(stale_ids)} stale stocks in signal generation."
+                )
+            else:
+                _write_quality_status(today, coverage, stale_ids, degraded=False)
+                _write_failure_report(failures)
+                conn.commit()
+                raise RuntimeError(
+                    f"Market data coverage is too low: {coverage:.1%} < "
+                    f"{degraded_min_coverage:.1%}. Stale/missing stocks={len(stale_ids)}. No signal generated."
+                )
 
+            expected_date = today
+        else:
+            coverage, stale_ids = _coverage(conn, stock_ids, expected_date)
+            degraded = coverage < min_coverage
+            if coverage < degraded_min_coverage:
+                _write_quality_status(expected_date, coverage, stale_ids, degraded=False)
+                _write_failure_report(failures)
+                conn.commit()
+                raise RuntimeError(
+                    f"Market data coverage is too low: {coverage:.1%} < "
+                    f"{degraded_min_coverage:.1%}. Stale/missing stocks={len(stale_ids)}."
+                )
+
+        _write_quality_status(expected_date, coverage, stale_ids, degraded)
         _write_failure_report(failures)
         conn.commit()
 
-        if coverage < min_coverage:
-            raise RuntimeError(
-                f"Market data coverage is too low: {coverage:.1%} < {min_coverage:.1%}. "
-                f"Stale/missing stocks={len(stale_ids)}. No signal generated."
-            )
-
-    print(f"Market data date: {expected_date} ({'TAIEX benchmark' if benchmark_used else 'stock-data fallback'})")
+    print(f"Market data date: {expected_date} (stock-data freshness anchor)")
     print(f"Freshness coverage: {coverage:.1%}")
     print(f"Updated stocks: {stocks_updated}")
     print(f"Upserted rows: {rows_upserted}")
+    if degraded:
+        print(
+            f"Data quality: DEGRADED ({coverage:.1%}); "
+            f"signal generation will use stocks with data on {expected_date.isoformat()}."
+        )
     if failures:
         print(f"Price update failures: {len(failures)} (see reports/price_update_failures.csv)")
     return stocks_updated, rows_upserted
@@ -408,7 +428,17 @@ def main() -> None:
     parser.add_argument("--retry-attempts", type=int, default=DEFAULT_RETRY_ATTEMPTS)
     parser.add_argument("--retry-wait-seconds", type=int, default=DEFAULT_RETRY_WAIT_SECONDS)
     parser.add_argument("--min-coverage", type=float, default=DEFAULT_MIN_COVERAGE)
-    parser.add_argument("--allow-stale-date", action="store_true", help="Do not require Yahoo/stock-data date to equal today")
+    parser.add_argument(
+        "--degraded-min-coverage",
+        type=float,
+        default=DEFAULT_DEGRADED_MIN_COVERAGE,
+        help="Minimum same-day coverage that permits safe degraded-mode signal generation",
+    )
+    parser.add_argument(
+        "--allow-stale-date",
+        action="store_true",
+        help="Do not require stock-data date to equal today",
+    )
     args = parser.parse_args()
     update_database(
         args.db,
@@ -416,6 +446,7 @@ def main() -> None:
         retry_attempts=args.retry_attempts,
         retry_wait_seconds=args.retry_wait_seconds,
         min_coverage=args.min_coverage,
+        degraded_min_coverage=args.degraded_min_coverage,
         require_today=not args.allow_stale_date,
     )
 

@@ -17,8 +17,12 @@ reports/
 
 relative_strength_selectivity_v1_3.csv
 
-# V1.5 Live runtime outputs
+# V1.5/V1.6 Live runtime outputs
 live/output/
 live/logs/
 daily_signals/
 *.log
+
+# V1.6 personal portfolio state
+# Contains user-specific capital, holdings and trade history.
+data/portfolio_state.json

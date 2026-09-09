@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta
 
 import pandas as pd
 
-from scripts.update_daily_prices import _ensure_status_table, _get_active_stock_ids, _upsert_stock_history
+from scripts.update_daily_prices import TAIPEI_TZ, _ensure_status_table, _get_active_stock_ids, _upsert_stock_history
 
 
 def test_upsert_uses_date_column_not_dataframe_index() -> None:
@@ -69,13 +70,14 @@ def test_get_active_stock_ids_skips_recently_quarantined_tickers() -> None:
                 ("1815", "Unavailable", "TWSE", 100000, "2026-08-27T18:30:00+08:00"),
             ],
         )
+        recent = (datetime.now(TAIPEI_TZ) - timedelta(days=1)).isoformat()
         conn.execute(
             """
             INSERT INTO price_update_status
                 (stock_id, consecutive_failures, last_error, quarantined, updated_at)
             VALUES (?, ?, ?, ?, ?)
             """,
-            ("1815", 3, "Yahoo returned no usable price data", 1, "2026-08-27T18:30:00+08:00"),
+            ("1815", 3, "Yahoo returned no usable price data", 1, recent),
         )
 
         active = _get_active_stock_ids(conn)
