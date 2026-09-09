@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import sqlite3
-
-import pandas as pd
+from datetime import datetime, timedelta
 
 from scripts import run_daily_agent
-from scripts.update_daily_prices import _ensure_status_table, _resolve_expected_date
+from scripts.update_daily_prices import _ensure_status_table, _get_active_stock_ids, _resolve_expected_date, TAIPEI_TZ
 
 
-def test_benchmark_resolution_falls_back_to_stock_data(monkeypatch):
+def test_expected_date_falls_back_to_stock_data():
     with sqlite3.connect(":memory:") as conn:
         conn.execute(
             "CREATE TABLE daily_price (stock_id TEXT, date TEXT, open REAL, high REAL, low REAL, close REAL, volume INTEGER)"
@@ -19,21 +18,10 @@ def test_benchmark_resolution_falls_back_to_stock_data(monkeypatch):
         )
         _ensure_status_table(conn)
 
-        monkeypatch.setattr(
-            "scripts.update_daily_prices._fetch_benchmark_date",
-            lambda: None,
-        )
-
-        expected_date, benchmark_used = _resolve_expected_date(
-            conn,
-            ["2330", "2317"],
-            retry_attempts=1,
-            retry_wait_seconds=0,
-        )
+        expected_date = _resolve_expected_date(conn, ["2330", "2317"])
 
     assert expected_date is not None
     assert expected_date.isoformat() == "2026-08-28"
-    assert benchmark_used is False
 
 
 def test_failure_alert_can_import_email_notifier_from_repo_root(monkeypatch):
@@ -48,3 +36,44 @@ def test_failure_alert_can_import_email_notifier_from_repo_root(monkeypatch):
 
     assert called["subject"] == "Daily Stock Agent ALERT - Data Refresh Failed"
     assert "test failure" in called["body"]
+
+
+def test_recently_quarantined_tickers_are_skipped():
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute(
+            """
+            CREATE TABLE stock_universe (
+                stock_id TEXT PRIMARY KEY,
+                stock_name TEXT NOT NULL,
+                market TEXT NOT NULL,
+                transaction_amount REAL NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        _ensure_status_table(conn)
+        conn.executemany(
+            """
+            INSERT INTO stock_universe
+                (stock_id, stock_name, market, transaction_amount, is_active, updated_at)
+            VALUES (?, ?, ?, ?, 1, ?)
+            """,
+            [
+                ("2330", "TSMC", "TWSE", 1000000, "2026-08-27T18:30:00+08:00"),
+                ("1815", "Unavailable", "TWSE", 100000, "2026-08-27T18:30:00+08:00"),
+            ],
+        )
+        recent = (datetime.now(TAIPEI_TZ) - timedelta(days=1)).isoformat()
+        conn.execute(
+            """
+            INSERT INTO price_update_status
+                (stock_id, consecutive_failures, last_error, quarantined, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("1815", 3, "Yahoo returned no usable price data", 1, recent),
+        )
+
+        active = _get_active_stock_ids(conn)
+
+    assert active == ["2330"]
