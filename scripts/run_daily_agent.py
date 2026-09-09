@@ -34,8 +34,17 @@ def run_step(name: str, command: list[str], env: dict[str, str]) -> None:
 
 def _send_failure_alert(error: Exception) -> None:
     try:
-        command = [sys.executable, "email_notifier.py", "--failure", str(error)]
-        subprocess.run(command, cwd=REPO_ROOT, env=os.environ.copy(), check=False)
+        import email_notifier
+
+        body = (
+            "Daily Stock Agent ALERT\n\n"
+            "The scheduled pipeline failed before a normal daily report could be delivered.\n\n"
+            f"Reason: {error}\n"
+        )
+        email_notifier.send_email(
+            body,
+            subject="Daily Stock Agent ALERT - Data Refresh Failed",
+        )
     except Exception as alert_error:  # noqa: BLE001 - alert must never hide root cause
         print(f"Alert email: failed ({alert_error})")
 
