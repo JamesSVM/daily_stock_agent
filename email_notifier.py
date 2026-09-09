@@ -52,12 +52,16 @@ def render_report(
                     f"   Why selected: {rec.get('reason')}",
                 ]
             )
+            summary = rec.get("summary")
+            if summary:
+                lines.append("   Explanation: " + str(summary))
             if rec.get("strengths"):
                 lines.append("   Strengths: " + "; ".join(str(x) for x in rec["strengths"]))
             if rec.get("risks"):
                 lines.append("   Key risk: " + "; ".join(str(x) for x in rec["risks"]))
     else:
         lines.append("NO TOP-3 RECOMMENDATION TODAY.")
+        lines.append("No selected signals today.")
         if market_regime.upper() == "BEAR":
             lines.append("Reason: new entries are blocked in BEAR regime by default.")
         elif not candidates:
@@ -73,6 +77,7 @@ def render_report(
             f"  V1.6 eligible for AI ranking: {len(eligible)}",
             f"  AI recommendations: {len(recommendations)}",
             "",
+            "LLM output is explanation-only; it cannot change the quantitative action.",
             "The quantitative engine determines eligibility. AI only prioritizes the eligible pool into Top 3 and explains the selection.",
         ]
     )
