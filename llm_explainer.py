@@ -71,12 +71,7 @@ class ExplanationConfig:
 
 def _post_json(url: str, payload: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    req = request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
     try:
         with request.urlopen(req, timeout=timeout_seconds) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -85,9 +80,7 @@ def _post_json(url: str, payload: dict[str, Any], timeout_seconds: int) -> dict[
             detail = exc.read().decode("utf-8", errors="replace").strip()
         except Exception:
             detail = ""
-        raise RuntimeError(
-            f"Ollama HTTP {exc.code} at {url}. Response: {detail or '<empty>'}"
-        ) from exc
+        raise RuntimeError(f"Ollama HTTP {exc.code} at {url}. Response: {detail or '<empty>'}") from exc
     except error.URLError as exc:
         raise RuntimeError(f"Unable to reach Ollama at {url}: {exc}") from exc
     except json.JSONDecodeError as exc:
@@ -103,22 +96,34 @@ def _config_from_env() -> ExplanationConfig:
 
 
 def _candidate_facts(signal: dict[str, Any]) -> dict[str, Any]:
+    return {key: signal.get(key) for key in (
+        "date", "stock_id", "market_regime", "close", "rs20", "rs60", "drawdown_20d",
+        "score", "trade_score", "trend_pass", "momentum_pass", "pullback_pass", "candidate",
+        "selected", "action", "reason", "portfolio_reason",
+    )}
+
+
+def _build_payload(signal: dict[str, Any], config: ExplanationConfig) -> dict[str, Any]:
+    """Build the single-signal explanation payload; kept public-to-tests as a stable helper."""
+    facts = _candidate_facts(signal)
+    user_prompt = (
+        "請用繁體中文（zh-TW）解釋這一檔已被 AI 排入 Top 3 的候選股票。\n"
+        "不得改變 action，也不得加入外部資訊。 Do not change its action.\n\n"
+        + json.dumps(facts, ensure_ascii=False, sort_keys=True, default=str)
+    )
     return {
-        key: signal.get(key)
-        for key in (
-            "date", "stock_id", "market_regime", "close", "rs20", "rs60",
-            "drawdown_20d", "score", "trade_score", "trend_pass", "momentum_pass",
-            "pullback_pass", "candidate", "selected", "action", "reason",
-            "portfolio_reason",
-        )
+        "model": config.model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        "stream": False,
+        "format": EXPLANATION_SCHEMA,
+        "options": {"temperature": 0, "seed": 101},
     }
 
 
-def rank_top_candidates(
-    candidates: list[dict[str, Any]],
-    config: ExplanationConfig | None = None,
-) -> list[dict[str, Any]]:
-    """Ask Ollama to rank the eligible candidate pool and return at most Top 3."""
+def rank_top_candidates(candidates: list[dict[str, Any]], config: ExplanationConfig | None = None) -> list[dict[str, Any]]:
     if not candidates:
         return []
     config = config or _config_from_env()
@@ -130,10 +135,7 @@ def rank_top_candidates(
     )
     payload = {
         "model": config.model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
+        "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}],
         "stream": False,
         "format": RANKING_SCHEMA,
         "options": {"temperature": 0, "seed": 101},
@@ -149,7 +151,6 @@ def rank_top_candidates(
     recommendations = result.get("recommendations") if isinstance(result, dict) else None
     if not isinstance(recommendations, list):
         raise RuntimeError("Ollama ranking response missing recommendations list.")
-
     candidate_ids = {str(item.get("stock_id")) for item in candidates}
     seen: set[str] = set()
     validated: list[dict[str, Any]] = []
@@ -160,43 +161,24 @@ def rank_top_candidates(
         if not stock_id or stock_id not in candidate_ids or stock_id in seen:
             continue
         seen.add(stock_id)
-        validated.append(
-            {
-                "stock_id": stock_id,
-                "rank": len(validated) + 1,
-                "reason": str(item.get("reason") or "AI prioritized this candidate based on the supplied quantitative signals."),
-                "strengths": item.get("strengths") if isinstance(item.get("strengths"), list) else [],
-                "risks": item.get("risks") if isinstance(item.get("risks"), list) else [],
-                "model": config.model,
-            }
-        )
+        validated.append({
+            "stock_id": stock_id,
+            "rank": len(validated) + 1,
+            "reason": str(item.get("reason") or "AI prioritized this candidate based on the supplied quantitative signals."),
+            "strengths": item.get("strengths") if isinstance(item.get("strengths"), list) else [],
+            "risks": item.get("risks") if isinstance(item.get("risks"), list) else [],
+            "model": config.model,
+        })
         if len(validated) >= TOP_RECOMMENDATIONS:
             break
-
     if not validated:
         raise RuntimeError("Ollama ranking returned no valid candidate stock IDs.")
     return validated
 
 
 def explain_signal(signal: dict[str, Any], config: ExplanationConfig | None = None) -> dict[str, Any]:
-    """Explain one already-ranked recommendation with local Ollama."""
     config = config or _config_from_env()
-    facts = _candidate_facts(signal)
-    user_prompt = (
-        "請用繁體中文（zh-TW）解釋這一檔已被 AI 排入 Top 3 的候選股票。\n"
-        "不得改變 action，也不得加入外部資訊。\n\n"
-        + json.dumps(facts, ensure_ascii=False, sort_keys=True, default=str)
-    )
-    payload = {
-        "model": config.model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        "stream": False,
-        "format": EXPLANATION_SCHEMA,
-        "options": {"temperature": 0, "seed": 101},
-    }
+    payload = _build_payload(signal, config)
     response = _post_json(config.url, payload, config.timeout_seconds)
     content = (response.get("message") or {}).get("content")
     if not isinstance(content, str) or not content.strip():
@@ -212,23 +194,13 @@ def explain_signal(signal: dict[str, Any], config: ExplanationConfig | None = No
             raise RuntimeError(f"Ollama explanation missing required field: {key}")
     if not isinstance(explanation["summary"], str):
         raise RuntimeError("Ollama explanation summary must be a string.")
-    if not isinstance(explanation["strengths"], list) or not all(
-        isinstance(x, str) for x in explanation["strengths"]
-    ):
+    if not isinstance(explanation["strengths"], list) or not all(isinstance(x, str) for x in explanation["strengths"]):
         raise RuntimeError("Ollama explanation strengths must be a list of strings.")
-    if not isinstance(explanation["risks"], list) or not all(
-        isinstance(x, str) for x in explanation["risks"]
-    ):
+    if not isinstance(explanation["risks"], list) or not all(isinstance(x, str) for x in explanation["risks"]):
         raise RuntimeError("Ollama explanation risks must be a list of strings.")
     return {
-        "date": signal.get("date"),
-        "stock_id": signal.get("stock_id"),
-        "action": signal.get("action"),
-        "selected": bool(signal.get("selected", False)),
-        "score": signal.get("score"),
-        "rs20": signal.get("rs20"),
-        "drawdown_20d": signal.get("drawdown_20d"),
-        "market_regime": signal.get("market_regime"),
-        **explanation,
-        "model": config.model,
+        "date": signal.get("date"), "stock_id": signal.get("stock_id"), "action": signal.get("action"),
+        "selected": bool(signal.get("selected", False)), "score": signal.get("score"),
+        "rs20": signal.get("rs20"), "drawdown_20d": signal.get("drawdown_20d"),
+        "market_regime": signal.get("market_regime"), **explanation, "model": config.model,
     }
