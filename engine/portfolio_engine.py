@@ -13,7 +13,7 @@ DEFAULT_STATE_PATH = Path("data/portfolio_state.json")
 @dataclass(frozen=True)
 class PortfolioConfig:
     total_capital: float = 0.0
-    cash_available: float = 0.0
+    cash_available: float | None = None
     max_positions: int = 999999
     max_position_pct: float = 1.0
     target_position_pct: float = 0.15
@@ -22,6 +22,10 @@ class PortfolioConfig:
     min_score: float = 85.0
     min_order_amount: float = 0.0
     bear_market_entry: bool = False
+
+    def __post_init__(self) -> None:
+        if self.cash_available is None:
+            object.__setattr__(self, "cash_available", max(float(self.total_capital), 0.0))
 
 @dataclass
 class PortfolioState:
@@ -92,7 +96,7 @@ def allocate_candidate(*, stock_id: str, score: float, close: float, market_regi
         return result
     target_amount = state.config.total_capital * state.config.target_position_pct
     max_amount = state.config.total_capital * state.config.max_position_pct
-    allocation_amount = min(target_amount, max_amount, state.config.cash_available)
+    allocation_amount = min(target_amount, max_amount, state.config.cash_available or 0.0)
     if allocation_amount < state.config.min_order_amount or allocation_amount < close:
         result["portfolio_reason"] = "insufficient_cash"
         return result
