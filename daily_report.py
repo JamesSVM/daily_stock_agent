@@ -23,6 +23,8 @@ from email_notifier import render_report, send_email
 from llm_explainer import rank_top_candidates
 
 TOP_RECOMMENDATIONS = 3
+REPO_ROOT = Path(__file__).resolve().parent
+MARKET_DATA_STATUS_PATH = REPO_ROOT / "reports" / "market_data_status.txt"
 
 
 def _fallback_top3(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -53,6 +55,28 @@ def _fallback_top3(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     return results
+
+
+def _market_data_warning() -> str:
+    """Return a visible warning when market data was refreshed in degraded mode."""
+    if not MARKET_DATA_STATUS_PATH.exists():
+        return ""
+    try:
+        lines = MARKET_DATA_STATUS_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    values: dict[str, str] = {}
+    for line in lines:
+        if ":" in line:
+            key, value = line.split(":", 1)
+            values[key.strip()] = value.strip()
+    if values.get("Status") != "DEGRADED":
+        return ""
+    return (
+        "⚠️ 資料品質警告：今日部分股票的市場資料未更新到最新交易日，"
+        f"目前 freshness coverage={values.get('Freshness coverage', 'N/A')}。"
+        "本次訊號僅會使用有最新日期資料的股票。\n\n"
+    )
 
 
 def run(
@@ -101,6 +125,7 @@ def run(
         market_regime=regime,
         signal_date=signal_date,
     )
+    report = _market_data_warning() + report
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -122,7 +147,7 @@ def main() -> None:
     parser.add_argument(
         "--portfolio-state",
         default=DEFAULT_PORTFOLIO_STATE,
-        help="JSON file containing capital, positions and trade history",
+        help="JSON file containing optional total capital and current holdings",
     )
     parser.add_argument("--send-email", action="store_true", help="Send the report by SMTP")
     args = parser.parse_args()
